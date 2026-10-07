@@ -1,0 +1,52 @@
+name: CI
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Install locked dependencies
+        run: |
+          python -m pip install uv==0.12.23
+          uv sync --frozen
+      - name: Lint, formatting and types
+        run: |
+          uv run --frozen ruff check .
+          uv run --frozen ruff format --check .
+          uv run --frozen mypy
+      - name: Unit and HTTP contract tests
+        run: uv run --frozen pytest tests/unit
+      - name: Generate isolated credentials
+        run: |
+          python scripts/init_env.py
+          while IFS='=' read -r name value; do
+            case "$name" in
+              POSTGRES_PASSWORD|MIGRATION_DB_PASSWORD|APP_DB_PASSWORD)
+                printf '::add-mask::%s\n' "$value"
+                ;;
+            esac
+          done < .env
+      - name: Validate Compose and start PostgreSQL, migrations and API
+        run: |
+          docker compose config --quiet
+          docker compose up --build --wait --wait-timeout 180
+      - name: Real PostgreSQL, privileges and migrations
+        run: uv run --frozen pytest tests/integration
+      - name: Verify running HTTP server
+        run: |
+          curl --fail --silent http://127.0.0.1:8000/health/live
+          curl --fail --silent http://127.0.0.1:8000/health/ready
+      - name: Container diagnostics on failure
+        if: failure()
+        run: docker compose logs --no-color
+      - name: Clean up isolated CI volumes
+        if: always()
+        run: docker compose down --volumes --remove-orphans

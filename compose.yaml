@@ -1,0 +1,54 @@
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: payment_ledger
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Generate .env with scripts/init_env.py}
+      MIGRATION_DB_PASSWORD: ${MIGRATION_DB_PASSWORD:?Generate .env with scripts/init_env.py}
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+    ports:
+      - "127.0.0.1:${APP_DB_PORT:-15432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/init-db.sh:/docker-entrypoint-initdb.d/10-migrator.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d payment_ledger"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  migrate:
+    build: .
+    image: payment-ledger:local
+    environment:
+      APP_DB_HOST: db
+      APP_DB_PORT: "5432"
+      APP_DB_NAME: payment_ledger
+      MIGRATION_DB_PASSWORD: ${MIGRATION_DB_PASSWORD:?Generate .env with scripts/init_env.py}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?Generate .env with scripts/init_env.py}
+    command: ["sh", "-c", "alembic upgrade head && python scripts/provision_app.py"]
+    depends_on:
+      db:
+        condition: service_healthy
+  api:
+    build: .
+    image: payment-ledger:local
+    environment:
+      APP_DB_HOST: db
+      APP_DB_PORT: "5432"
+      APP_DB_NAME: payment_ledger
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?Generate .env with scripts/init_env.py}
+    ports:
+      - "127.0.0.1:${API_PORT:-8000}:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=8)"]
+      interval: 5s
+      timeout: 10s
+      retries: 12
+      start_period: 5s
+
+volumes:
+  postgres_data:
