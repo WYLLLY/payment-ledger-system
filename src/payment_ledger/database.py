@@ -37,6 +37,14 @@ def database_is_ready(engine: Engine) -> bool:
                     text(
                         """SELECT current_user = 'payment_app'
                            AND has_schema_privilege(current_user, 'payment', 'USAGE')
+                           AND to_regclass('payment.ledger_journals') IS NOT NULL
+                           AND to_regclass('payment.ledger_entries') IS NOT NULL
+                           AND has_table_privilege(
+                               current_user, to_regclass('payment.ledger_journals'), 'SELECT'
+                           )
+                           AND has_table_privilege(
+                               current_user, to_regclass('payment.ledger_entries'), 'SELECT'
+                           )
                            AND to_regclass('payment.users') IS NOT NULL
                            AND to_regclass('payment.sessions') IS NOT NULL
                            AND to_regclass('payment.wallets') IS NOT NULL

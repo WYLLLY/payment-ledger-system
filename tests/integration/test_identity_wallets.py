@@ -169,7 +169,8 @@ def test_wallets_are_private_and_have_exactly_two_zero_accounts(
     assert client.post("/wallets", json={"currency": "EUR"}, headers=bob).status_code == 201
     with database.connect(user="payment_migrator") as connection:
         assert connection.execute(
-            "SELECT count(*), sum(balance_minor) FROM payment.ledger_accounts"
+            "SELECT count(*), sum(balance_minor) FROM payment.ledger_accounts "
+            "WHERE wallet_id IS NOT NULL"
         ).fetchone() == (8, 0)
         assert connection.execute(
             "SELECT count(*) FROM payment.audit_events WHERE event_type='wallet_created'"
@@ -208,7 +209,8 @@ def test_concurrent_wallet_creation_is_atomic(database: Database, client: TestCl
     with database.connect(user="payment_migrator") as connection:
         assert connection.execute("SELECT count(*) FROM payment.wallets").fetchone() == (1,)
         assert connection.execute(
-            "SELECT count(*), sum(balance_minor) FROM payment.ledger_accounts"
+            "SELECT count(*), sum(balance_minor) FROM payment.ledger_accounts "
+            "WHERE wallet_id IS NOT NULL"
         ).fetchone() == (2, 0)
         assert connection.execute(
             "SELECT count(*) FROM payment.audit_events WHERE event_type='wallet_created'"
@@ -235,7 +237,9 @@ def test_wallet_partial_failure_rolls_back_all_state(
     assert "injected" not in response.text
     with database.connect(user="payment_migrator") as connection:
         assert connection.execute("SELECT count(*) FROM payment.wallets").fetchone() == (0,)
-        assert connection.execute("SELECT count(*) FROM payment.ledger_accounts").fetchone() == (0,)
+        assert connection.execute(
+            "SELECT count(*) FROM payment.ledger_accounts WHERE wallet_id IS NOT NULL"
+        ).fetchone() == (0,)
         assert connection.execute(
             "SELECT count(*) FROM payment.audit_events WHERE event_type='wallet_created'"
         ).fetchone() == (0,)
@@ -258,12 +262,16 @@ def test_database_pair_currency_and_nonnegative_constraints(
             "DELETE FROM payment.ledger_accounts WHERE id=%s", (wallet["accounts"][0]["id"],)
         )
     with database.connect(user="payment_migrator") as connection, pytest.raises(CheckViolation):
-        connection.execute("UPDATE payment.ledger_accounts SET balance_minor=-1")
+        connection.execute(
+            "UPDATE payment.ledger_accounts SET balance_minor=-1 WHERE wallet_id IS NOT NULL"
+        )
     with (
         database.connect(user="payment_migrator") as connection,
         pytest.raises(ForeignKeyViolation),
     ):
-        connection.execute("UPDATE payment.ledger_accounts SET currency='USD'")
+        connection.execute(
+            "UPDATE payment.ledger_accounts SET currency='USD' WHERE wallet_id IS NOT NULL"
+        )
     with database.connect() as connection, pytest.raises(ForeignKeyViolation):
         connection.execute("SELECT payment.create_wallet(%s,'USD')", (uuid4(),))
     with database.connect() as connection, pytest.raises(CheckViolation):
@@ -421,7 +429,10 @@ def test_worker_and_public_have_no_identity_function_privileges(database: Databa
                    has_function_privilege('payment_worker', p.oid, 'EXECUTE'),
                    EXISTS (SELECT FROM aclexplode(p.proacl) a WHERE a.grantee=0)
             FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
-            WHERE n.nspname='payment'
+            WHERE n.nspname='payment' AND p.proname IN (
+                'assert_wallet_pair', 'check_wallet_pair', 'create_wallet',
+                'revoke_session', 'take_auth_slot'
+            )
         """).fetchall()
         assert len(rows) == 5
         for _, security_definer, config, worker_execute, public_grant in rows:
@@ -517,7 +528,9 @@ def test_audit_failure_rolls_back_business_change(
             "SELECT count(*) FROM payment.sessions WHERE revoked_at IS NULL"
         ).fetchone() == (1,)
         assert connection.execute("SELECT count(*) FROM payment.wallets").fetchone() == (0,)
-        assert connection.execute("SELECT count(*) FROM payment.ledger_accounts").fetchone() == (0,)
+        assert connection.execute(
+            "SELECT count(*) FROM payment.ledger_accounts WHERE wallet_id IS NOT NULL"
+        ).fetchone() == (0,)
         assert connection.execute("SELECT count(*) FROM payment.audit_events").fetchone() == (2,)
 
 

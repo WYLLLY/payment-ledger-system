@@ -4,7 +4,7 @@ from typing import Annotated, cast
 from uuid import UUID
 
 from argon2.exceptions import InvalidHashError, VerificationError
-from fastapi import APIRouter, Depends, FastAPI, Request, Response
+from fastapi import APIRouter, Depends, FastAPI, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -20,6 +20,7 @@ from payment_ledger.errors import (
     ResourceNotFound,
 )
 from payment_ledger.health import get_database_engine
+from payment_ledger.ledger.history import HistoryEntry, history
 from payment_ledger.schemas import (
     LoginRequest,
     RegistrationRequest,
@@ -114,6 +115,17 @@ def list_wallets(user: UserDependency, engine: EngineDependency) -> list[WalletR
 @router.get("/wallets/{wallet_id}")
 def get_wallet(wallet_id: UUID, user: UserDependency, engine: EngineDependency) -> WalletResponse:
     return services.get_wallet(engine, user.id, wallet_id)
+
+
+@router.get("/wallets/{wallet_id}/ledger")
+def wallet_history(
+    wallet_id: UUID,
+    user: UserDependency,
+    engine: EngineDependency,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0, le=1000000)] = 0,
+) -> list[HistoryEntry]:
+    return history(engine, user.id, wallet_id, limit, offset)
 
 
 def install_error_handlers(app: FastAPI) -> None:
