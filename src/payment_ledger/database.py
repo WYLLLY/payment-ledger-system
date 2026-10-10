@@ -35,8 +35,66 @@ def database_is_ready(engine: Engine) -> bool:
             return bool(
                 connection.scalar(
                     text(
-                        "SELECT current_user = 'payment_app' "
-                        "AND has_schema_privilege(current_user, 'payment', 'USAGE')"
+                        """SELECT current_user = 'payment_app'
+                           AND has_schema_privilege(current_user, 'payment', 'USAGE')
+                           AND to_regclass('payment.users') IS NOT NULL
+                           AND to_regclass('payment.sessions') IS NOT NULL
+                           AND to_regclass('payment.wallets') IS NOT NULL
+                           AND to_regclass('payment.ledger_accounts') IS NOT NULL
+                           AND to_regclass('payment.audit_events') IS NOT NULL
+                           AND to_regclass('payment.auth_rate_limits') IS NOT NULL
+                           AND has_table_privilege(
+                               current_user, to_regclass('payment.users'), 'SELECT'
+                           )
+                           AND has_table_privilege(
+                               current_user, to_regclass('payment.sessions'), 'SELECT'
+                           )
+                           AND has_table_privilege(
+                               current_user, to_regclass('payment.wallets'), 'SELECT'
+                           )
+                           AND has_table_privilege(
+                               current_user, to_regclass('payment.ledger_accounts'), 'SELECT'
+                           )
+                           AND has_column_privilege(
+                               current_user, to_regclass('payment.users'), 'email', 'INSERT'
+                           )
+                           AND has_column_privilege(
+                               current_user, to_regclass('payment.users'), 'password_hash', 'INSERT'
+                           )
+                           AND has_column_privilege(
+                               current_user, to_regclass('payment.sessions'), 'token_hash', 'INSERT'
+                           )
+                           AND has_column_privilege(
+                               current_user, to_regclass('payment.sessions'), 'user_id', 'INSERT'
+                           )
+                           AND has_column_privilege(
+                               current_user, to_regclass('payment.sessions'), 'expires_at', 'INSERT'
+                           )
+                           AND has_column_privilege(
+                               current_user, to_regclass('payment.audit_events'),
+                               'user_id', 'INSERT'
+                           )
+                           AND has_column_privilege(
+                               current_user, to_regclass('payment.audit_events'),
+                               'event_type', 'INSERT'
+                           )
+                           AND has_column_privilege(
+                               current_user, to_regclass('payment.audit_events'),
+                               'resource_id', 'INSERT'
+                           )
+                           AND has_function_privilege(
+                               current_user, to_regprocedure('payment.create_wallet(uuid,text)'),
+                               'EXECUTE'
+                           )
+                           AND has_function_privilege(
+                               current_user, to_regprocedure('payment.revoke_session(bytea)'),
+                               'EXECUTE'
+                           )
+                           AND has_function_privilege(
+                               current_user,
+                               to_regprocedure('payment.take_auth_slot(bytea,integer,integer)'),
+                               'EXECUTE'
+                           )"""
                     )
                 )
             )

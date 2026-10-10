@@ -44,6 +44,7 @@ jobs:
         run: |
           curl --fail --silent http://127.0.0.1:8000/health/live
           curl --fail --silent http://127.0.0.1:8000/health/ready
+          uv run --frozen python scripts/smoke_api.py
       - name: Container diagnostics on failure
         if: failure()
         run: docker compose logs --no-color

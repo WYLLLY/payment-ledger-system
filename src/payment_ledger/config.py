@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     db_connect_timeout: int = Field(default=3, ge=1, le=30)
     db_statement_timeout_ms: int = Field(default=3000, ge=100, le=30000)
     db_pool_timeout: int = Field(default=3, ge=1, le=30)
+    session_ttl_seconds: int = Field(default=3600, ge=60, le=86400)
+    auth_rate_limit: int = Field(default=20, ge=1, le=1000)
+    auth_rate_window_seconds: int = Field(default=60, ge=1, le=3600)
 
     def database_url(self) -> URL:
         return URL.create(

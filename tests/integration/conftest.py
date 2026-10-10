@@ -113,7 +113,7 @@ class Database:
 
 
 @pytest.fixture
-def database() -> Iterator[Database]:
+def database(request: pytest.FixtureRequest) -> Iterator[Database]:
     settings = Settings()
     credentials = TestCredentials()
     name = f"payment_test_{uuid4().hex}"
@@ -124,7 +124,8 @@ def database() -> Iterator[Database]:
         )
         try:
             test_database = Database(settings.model_copy(update={"db_name": name}), credentials)
-            test_database.migrate("upgrade", "head")
+            revision = request.node.get_closest_marker("migration_revision")
+            test_database.migrate("upgrade", revision.args[0] if revision else "head")
             yield test_database
         finally:
             administrator.execute(

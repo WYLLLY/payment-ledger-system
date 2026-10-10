@@ -1,8 +1,8 @@
 # Payment & Ledger System
 
-Milestone 1: a typed FastAPI application, real PostgreSQL, restricted database
-roles, Alembic migrations and CI. No financial or authentication functionality is
-implemented yet. The [approved plan](docs/approved-plan.md) defines later work.
+Milestones 1–2: a typed FastAPI application, real PostgreSQL, restricted database
+roles, Alembic migrations and CI, with identity, opaque sessions and empty wallets.
+The [approved plan](docs/approved-plan.md) defines later financial functionality.
 
 ## Run locally
 
@@ -26,7 +26,7 @@ the application password, then starts the API. The database volume persists.
 To run the API on the host after starting the database and migrations:
 
 ```sh
-uv run --frozen uvicorn payment_ledger.main:create_app --factory
+uv run --frozen uvicorn payment_ledger.main:create_app --factory --no-proxy-headers
 ```
 
 Stop the stack with `docker compose down`. Adding `--volumes` **deletes its local
@@ -47,6 +47,12 @@ src/payment_ledger/
   database.py     engine creation, connection timeouts and readiness probe
   health.py       HTTP routes, response schema and request dependency
   main.py         application factory and engine lifecycle
+  api.py          identity and wallet HTTP routes, dependencies and safe errors
+  services.py     application operations and transaction boundaries
+  security.py     Argon2id passwords, random tokens and token hashing
+  schemas.py      request validation and explicit response models
+  models.py       SQLAlchemy persistence mappings; migrations own DDL
+  errors.py       application errors translated by the HTTP layer
 migrations/       versioned schema and privilege changes
 docker/           administrator bootstrap for a fresh PostgreSQL volume
 scripts/          local secret generation and runtime credential provisioning
@@ -55,18 +61,19 @@ tests/integration/ real PostgreSQL, role privileges and migration lifecycle
 ```
 
 Modules have focused responsibilities. The engine is injected through FastAPI's
-request dependency and disposed at application shutdown. There are no speculative
-repositories, service layers or interfaces. This is the concrete use of single
-responsibility and dependency injection here; no class hierarchy is needed.
+request dependency and disposed at application shutdown. Application services own
+transactions; no repository interfaces or speculative class hierarchy are needed.
+This keeps responsibilities and dependencies explicit.
 
 `GET /health/live` reports process liveness without a database connection.
-`GET /health/ready` checks connectivity as `payment_app` and schema access. It
+`GET /health/ready` checks connectivity as `payment_app`, the M2 tables, required
+column/table permissions and EXECUTE grants on M2 functions. It
 returns 200 with `{"status":"ok"}` or a generic 503 with
 `{"status":"unavailable"}`. Errors are not echoed to clients or logs. Readiness
 configures connect, server-side statement and pool wait timeouts. These are not an
 absolute network deadline: an established TCP connection with a nonresponsive
-peer can outlast them. The container probe has its own process timeout. It checks the Milestone 1
-schema, not compatibility with hypothetical future revisions.
+peer can outlast them. The container probe has its own process timeout. A database
+still at M1 or missing a required M2 privilege returns 503.
 
 ## Database boundary and migrations
 
@@ -81,22 +88,73 @@ schema, not compatibility with hypothetical future revisions.
 - Only the separate migration container receives migration credentials. The API
   configuration fixes its username to `payment_app` and receives only its password.
   Password provisioning happens after the migration, outside migration source.
-- Runtime roles get database CONNECT and schema USAGE only. They receive no
-  table writes, schema creation, TEMP privileges or migration-table access.
+- M1 grants runtime database CONNECT and schema USAGE. M2 adds only the API's
+  required reads, column-level inserts for users, sessions and audit events, and
+  execution of wallet creation, session revocation and auth-counter functions.
+  Runtime cannot directly write wallets/accounts/balances, update sessions,
+  read or edit audit events, create schemas/TEMP objects or access migration metadata.
   New functions created by the migrator are not executable by PUBLIC.
   `payment_worker` remains NOLOGIN until a later approved milestone needs it.
 - Downgrading to `base` removes the application schema and its runtime CONNECT
   grants. It intentionally retains cluster-wide roles and restrictive defaults;
   deleting them could affect another database. No `CASCADE` is used.
-- This is the first revision. The previous state is Alembic `base`, with no
-  earlier versioned schema. Tests cover fresh database → head, repeated head,
-  head → base → head. Future revisions must add their actual predecessor upgrade
-  checks.
+- Revision `0002_identity_wallets` follows `0001_foundation`. Tests retain the
+  empty-schema M1 check at its original revision and cover fresh base → head,
+  approved M1 → M2, repeated head, M2 → M1 → M2 and head → base → head.
+  Downgrading M2 removes its identity and wallet data; use only on disposable databases.
 
 Run migrations with `uv run --frozen alembic upgrade head`. Migration execution is
 online only because role and database validation requires PostgreSQL. Application
 startup never applies migrations. Deployment must serialize migrations; concurrent
 migration runners are outside the supported workflow.
+
+## Identity and wallets (M2)
+
+| Endpoint | Behavior |
+| --- | --- |
+| `POST /auth/register` | Email and password → user, 201; duplicate normalized email → 409 |
+| `POST /auth/login` | Email and password → opaque Bearer token and expiry |
+| `POST /auth/logout` | Revoke the presented session, 204 |
+| `GET /users/me` | Current authenticated user |
+| `POST /wallets` | Currency EUR, USD or JPY → wallet and two zero accounts, 201 |
+| `GET /wallets` | Current user's wallets |
+| `GET /wallets/{wallet_id}` | Owned wallet; absent or foreign → identical 404 |
+
+Protected routes require `Authorization: Bearer <token>`. Passwords are 12–128
+characters at registration; email addresses are validated, ASCII-only and normalized
+to lowercase. Argon2id uses 64 MiB, three iterations, four lanes and a random salt.
+Tokens use 32 cryptographically random bytes; PostgreSQL stores only SHA-256
+digests. Login errors are identical for unknown users and wrong passwords; an
+unknown user still incurs Argon2 verification. Tokens/passwords never enter audit
+events, error payloads or application logs. Use HTTPS for any non-local deployment.
+
+Session lifetime defaults to 3600 seconds (`APP_SESSION_TTL_SECONDS`, 60–86400).
+Logout revokes only the presented session. Requests authenticated before a logout
+may finish; later session checks reject it. There are no cookies, JWT, refresh tokens,
+email verification, password recovery or account-deletion flows in this milestone.
+Registration's 409 intentionally reveals that a normalized email already exists.
+
+`payment.create_wallet` inserts the wallet, its `available` and `reserved` accounts
+and an audit event in one transaction. Uniqueness plus a deferred constraint trigger
+require exactly two accounts; a composite FK requires the wallet's currency.
+Balances are BIGINT, initially zero and nonnegative. Runtime has no direct balance
+write permission. No posting, funding, journals, transfers or payments exist yet.
+
+Registration and login share an atomic PostgreSQL fixed-window counter per direct
+client IP:
+20 requests per 60 seconds by default, configured with `APP_AUTH_RATE_LIMIT` and
+`APP_AUTH_RATE_WINDOW_SECONDS`. Failed authentication consumes budget; exhaustion
+returns 429 and `Retry-After`. Logout remains available for a valid session even
+after this anonymous quota is exhausted. Uvicorn ignores forwarded headers in
+Compose and the documented host command. A future proxy deployment needs an explicit trusted-proxy
+policy. Clients sharing an IP share a budget; a fixed window permits boundary bursts
+and is not a distributed-attack defense. Counters, expired sessions and audits do not
+have automatic retention cleanup in M2.
+
+Password hashing/verification occurs outside write transactions. Successful state
+changes and their audits commit together; login failures have a separate audit
+transaction. The API database role remains a trusted boundary, as in the approved
+plan: it can act for users via granted operations; this is not per-user DB isolation.
 
 ## Verification
 
@@ -108,6 +166,7 @@ uv run --frozen pytest tests/unit
 docker compose up --build --wait --wait-timeout 180
 uv run --frozen pytest tests/integration
 uv run --frozen pytest
+uv run --frozen python scripts/smoke_api.py
 actionlint .github/workflows/ci.yml
 shellcheck docker/init-db.sh
 ```
@@ -126,5 +185,10 @@ builds the real Compose stack, tests PostgreSQL migrations and privileges, then
 probes the running HTTP server. CI generates its own ephemeral credentials and
 removes its volumes. No Git remote has been configured by this implementation.
 
+The HTTP smoke script targets the local Compose API on port 8000. It checks the
+identity/wallet/ownership/logout flow and leaves two dummy users and one zero-balance
+wallet; its sessions are revoked. Run it only against the development stack.
+
 See [Milestone 1 verification](docs/milestone-1-verification.md) for commands,
 observed results, independent review and remaining limitations.
+See [Milestone 2 verification](docs/milestone-2-verification.md) for M2 evidence.

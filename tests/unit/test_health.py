@@ -17,4 +17,13 @@ def test_openapi_documents_unavailable_response() -> None:
     with TestClient(create_app(Settings(db_password=SecretStr("test-only")))) as client:
         schema = client.get("/openapi.json").json()
     assert "503" in schema["paths"]["/health/ready"]["get"]["responses"]
-    assert set(schema["paths"]) == {"/health/live", "/health/ready"}
+    assert set(schema["paths"]) == {
+        "/health/live",
+        "/health/ready",
+        "/auth/register",
+        "/auth/login",
+        "/auth/logout",
+        "/users/me",
+        "/wallets",
+        "/wallets/{wallet_id}",
+    }

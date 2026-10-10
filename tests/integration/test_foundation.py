@@ -13,6 +13,7 @@ from .conftest import Database
 pytestmark = pytest.mark.integration
 
 
+@pytest.mark.migration_revision("0001_foundation")
 def test_fresh_migration_creates_only_foundation(database: Database) -> None:
     with database.connect(user="payment_migrator") as connection:
         assert connection.execute("SELECT version_num FROM public.alembic_version").fetchone() == (
@@ -84,6 +85,36 @@ def test_readiness_requires_migrated_schema_and_recovers(database: Database) -> 
         with database.connect(user="payment_migrator") as connection:
             connection.execute("ALTER SCHEMA unavailable_schema RENAME TO payment")
         assert client.get("/health/ready").status_code == 200
+
+
+@pytest.mark.migration_revision("0001_foundation")
+def test_readiness_tracks_m2_upgrade_and_downgrade(database: Database) -> None:
+    # Every probe uses the runtime role; only the test fixture runs migrations.
+    with TestClient(create_app(database.settings)) as client:
+        response = client.get("/health/ready")
+        assert response.status_code == 503
+        assert response.json() == {"status": "unavailable"}
+
+        database.migrate("upgrade", "head")
+        response = client.get("/health/ready")
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok"}
+
+        with database.connect(user="payment_migrator") as connection:
+            connection.execute(
+                "REVOKE EXECUTE ON FUNCTION payment.create_wallet(uuid, text) FROM payment_app"
+            )
+        assert client.get("/health/ready").status_code == 503
+        with database.connect(user="payment_migrator") as connection:
+            connection.execute(
+                "GRANT EXECUTE ON FUNCTION payment.create_wallet(uuid, text) TO payment_app"
+            )
+        assert client.get("/health/ready").status_code == 200
+
+        database.migrate("downgrade", "0001_foundation")
+        response = client.get("/health/ready")
+        assert response.status_code == 503
+        assert response.json() == {"status": "unavailable"}
 
 
 @pytest.mark.parametrize("role", ["payment_app", "payment_worker"])
