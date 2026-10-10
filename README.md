@@ -1,8 +1,9 @@
 # Payment & Ledger System
 
-Milestones 1–2: a typed FastAPI application, real PostgreSQL, restricted database
-roles, Alembic migrations and CI, with identity, opaque sessions and empty wallets.
-The [approved plan](docs/approved-plan.md) defines later financial functionality.
+Milestones 1–3: FastAPI, PostgreSQL, identity, opaque sessions, wallets and an
+immutable double-entry ledger with fixed dev/test openings and internal reconciliation.
+The [approved revised plan](docs/approved-plan.md) defines the scope. Transfers
+(M4), payments and workers are not implemented.
 
 ## Run locally
 
@@ -53,6 +54,7 @@ src/payment_ledger/
   schemas.py      request validation and explicit response models
   models.py       SQLAlchemy persistence mappings; migrations own DDL
   errors.py       application errors translated by the HTTP layer
+  ledger/         owner-scoped history and read-only internal reconciliation
 migrations/       versioned schema and privilege changes
 docker/           administrator bootstrap for a fresh PostgreSQL volume
 scripts/          local secret generation and runtime credential provisioning
@@ -66,14 +68,14 @@ transactions; no repository interfaces or speculative class hierarchy are needed
 This keeps responsibilities and dependencies explicit.
 
 `GET /health/live` reports process liveness without a database connection.
-`GET /health/ready` checks connectivity as `payment_app`, the M2 tables, required
+`GET /health/ready` checks connectivity as `payment_app`, the M2/M3 tables, required
 column/table permissions and EXECUTE grants on M2 functions. It
 returns 200 with `{"status":"ok"}` or a generic 503 with
 `{"status":"unavailable"}`. Errors are not echoed to clients or logs. Readiness
 configures connect, server-side statement and pool wait timeouts. These are not an
 absolute network deadline: an established TCP connection with a nonresponsive
 peer can outlast them. The container probe has its own process timeout. A database
-still at M1 or missing a required M2 privilege returns 503.
+still at M1/M2 or missing a required read/EXECUTE privilege returns 503.
 
 ## Database boundary and migrations
 
@@ -138,7 +140,8 @@ Registration's 409 intentionally reveals that a normalized email already exists.
 and an audit event in one transaction. Uniqueness plus a deferred constraint trigger
 require exactly two accounts; a composite FK requires the wallet's currency.
 Balances are BIGINT, initially zero and nonnegative. Runtime has no direct balance
-write permission. No posting, funding, journals, transfers or payments exist yet.
+write permission. M3 adds controlled dev/test opening journals; transfers and
+payments remain outside this milestone.
 
 Registration and login share an atomic PostgreSQL fixed-window counter per direct
 client IP:
@@ -183,7 +186,7 @@ opening worker test sessions, which immediately reduce privileges with
 GitHub Actions installs the frozen lockfile, runs lint/format/types/unit tests,
 builds the real Compose stack, tests PostgreSQL migrations and privileges, then
 probes the running HTTP server. CI generates its own ephemeral credentials and
-removes its volumes. No Git remote has been configured by this implementation.
+removes its volumes. Pull requests run the same verification.
 
 The HTTP smoke script targets the local Compose API on port 8000. It checks the
 identity/wallet/ownership/logout flow and leaves two dummy users and one zero-balance
@@ -192,3 +195,67 @@ wallet; its sessions are revoked. Run it only against the development stack.
 See [Milestone 1 verification](docs/milestone-1-verification.md) for commands,
 observed results, independent review and remaining limitations.
 See [Milestone 2 verification](docs/milestone-2-verification.md) for M2 evidence.
+
+## Ledger and fixed fixtures (M3)
+
+`0003_ledger` adds `ledger_journals` and `ledger_entries`, plus one `funding` and
+one `clearing` system account per currency. Only system accounts may be negative.
+Entries are nonzero BIGINT values bounded to ±1,000,000,000,000 minor units;
+projected balances use the full BIGINT range and overflow aborts the transaction.
+Composite foreign keys enforce the journal/account currency. Deferred constraint
+triggers require exactly two distinct accounts with opposite amounts at commit,
+including for an empty journal. UPDATE, DELETE and TRUNCATE triggers protect
+history; runtime roles have no direct writes to journals, entries or balances.
+
+The private `post_opening_pair` function validates ownership, currency, account
+kinds and bounds, then locks accounts individually in ascending UUID order. It
+inserts the pair and audit in the caller's transaction. An insertion trigger applies
+each delta with a conditional debit; PostgreSQL enforces nonnegative user balances.
+A unique wallet reference permits only one opening. A failed second line, audit,
+commit or overflow rolls everything back. M3 enables only the `opening` journal
+kind; later milestones must add their typed business operations and references.
+No financial function is executable by API/worker. SECURITY DEFINER functions
+fix `search_path=pg_catalog,pg_temp` and fully qualify application objects.
+
+`GET /wallets/{wallet_id}/ledger?limit=50&offset=0` returns only the authenticated
+owner's lines, without counterpart or system account identifiers. Limits are 1–100,
+offset 0–1,000,000. Foreign and missing wallets both return 404. Existing wallet
+reads display projected balances. There is no HTTP funding endpoint.
+
+### Dev/test fixtures only
+
+Use a dedicated dev/test cluster. **Do not run this provisioning command in the
+demonstration deployment.** Normal Compose startup and Alembic never create
+`payment_dev` and never grant funding capabilities to the API or worker.
+Roles are cluster-wide; a database on a cluster previously used for fixtures may
+see the role but receives no opening grant through migrations.
+
+```sh
+# Supply your own local password via DEMO_PASSWORD without committing it.
+PAYMENT_LEDGER_DEV_FIXTURES=1 make seed-demo
+make test-ledger
+make reconcile
+```
+
+`DEMO_PASSWORD` must contain 12–128 characters. The explicit seed command uses
+migration credentials to provision a restricted NOLOGIN `payment_dev` role and
+fixed users `alice.demo@example.com` / `bob.demo@example.com`. It creates one
+EUR/USD/JPY wallet for each, then switches to the dev role to execute openings.
+Each EUR/USD wallet receives 100,000 minor units and each JPY wallet 10,000;
+the function accepts no arbitrary amount. Initial balances and audits are atomic.
+The batch prelocks all participating accounts in global UUID order. Reruns
+serialize using a transaction advisory lock and preserve existing balances,
+passwords and journals. A direct duplicate opening fails rather than funding twice.
+Migration credentials stay in this local CLI, never in the API process.
+
+`make reconcile` uses the restricted application role and a single SQL statement
+(snapshot) to compare all projected balances to the ledger, verify pairs and
+per-currency conservation, and detect negative user balances. It prints JSON and
+exits 0 for PASS, 1 for inconsistencies, 2 for a database error. It never repairs
+history or balances. Provider/payment reconciliation belongs to later milestones.
+
+An empty M3 ledger supports M3 → M2 → M3. Downgrade refuses a populated ledger,
+preserving financial history. An administrator or compromised migrator can disable
+triggers/change schema; these guarantees intentionally exclude that trust boundary.
+
+See [Milestone 3 verification](docs/milestone-3-verification.md) for evidence.

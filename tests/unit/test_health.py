@@ -26,4 +26,5 @@ def test_openapi_documents_unavailable_response() -> None:
         "/users/me",
         "/wallets",
         "/wallets/{wallet_id}",
+        "/wallets/{wallet_id}/ledger",
     }

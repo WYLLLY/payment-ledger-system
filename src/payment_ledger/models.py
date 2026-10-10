@@ -47,7 +47,7 @@ class LedgerAccount(Base):
     __table_args__ = {"schema": "payment"}
 
     id: Mapped[UUID] = mapped_column(primary_key=True)
-    wallet_id: Mapped[UUID] = mapped_column(ForeignKey("payment.wallets.id"))
+    wallet_id: Mapped[UUID | None] = mapped_column(ForeignKey("payment.wallets.id"))
     currency: Mapped[str] = mapped_column(String(3))
     account_kind: Mapped[str] = mapped_column(Text)
     balance_minor: Mapped[int] = mapped_column(BigInteger)
