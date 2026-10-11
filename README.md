@@ -1,10 +1,11 @@
 # Payment & Ledger System
 
-Milestones 1–4: FastAPI, PostgreSQL, identity, opaque sessions, wallets and an
+Milestones 1–5: FastAPI, PostgreSQL, identity, opaque sessions, wallets and an
 immutable double-entry ledger with fixed dev/test openings and internal reconciliation.
 Atomic internal transfers use retained idempotency responses and ordered account locks.
-The [approved revised plan](docs/approved-plan.md) defines the scope. Payments
-and workers (M5) are not implemented.
+Asynchronous outgoing payments use atomic reservations, a fenced outbox worker
+and a persistent HTTP simulator. The [approved revised plan](docs/approved-plan.md)
+defines the scope; M6 remains unimplemented.
 
 ## Run locally
 
@@ -23,7 +24,10 @@ curl --fail http://127.0.0.1:8000/health/ready
 and refuses to overwrite an existing file. `.env.example` documents the variables
 without usable credentials. PostgreSQL is exposed on loopback port 15432; the API
 on loopback port 8000. Compose waits for PostgreSQL, runs migrations and provisions
-the application password, then starts the API. The database volume persists.
+the API and worker passwords, then starts the API and worker. PostgreSQL and
+provider SQLite volumes persist. The simulated provider is exposed on loopback 8001.
+For an existing M4 `.env`, run `python3 scripts/init_env.py --add-worker-secret`
+before starting M5; existing settings are preserved.
 
 To run the API on the host after starting the database and migrations:
 
@@ -57,6 +61,7 @@ src/payment_ledger/
   errors.py       application errors translated by the HTTP layer
   ledger/         owner-scoped history and read-only internal reconciliation
   transfers/      validated transfer contracts and transactional service
+  payments/       reservation service, fenced worker and HTTP/SQLite simulator
 migrations/       versioned schema and privilege changes
 docker/           administrator bootstrap for a fresh PostgreSQL volume
 scripts/          local secret generation and runtime credential provisioning
@@ -70,14 +75,14 @@ transactions; no repository interfaces or speculative class hierarchy are needed
 This keeps responsibilities and dependencies explicit.
 
 `GET /health/live` reports process liveness without a database connection.
-`GET /health/ready` checks connectivity as `payment_app`, the M2–M4 tables, required
-column/table permissions and EXECUTE grants on M2/M4 functions. It
+`GET /health/ready` checks connectivity as `payment_app`, the M2–M5 tables, required
+column/table permissions and EXECUTE grants on M2/M4/M5 functions. It
 returns 200 with `{"status":"ok"}` or a generic 503 with
 `{"status":"unavailable"}`. Errors are not echoed to clients or logs. Readiness
 configures connect, server-side statement and pool wait timeouts. These are not an
 absolute network deadline: an established TCP connection with a nonresponsive
 peer can outlast them. The container probe has its own process timeout. A database
-still at M1/M2/M3 or missing a required read/EXECUTE privilege returns 503.
+still at M1/M2/M3/M4 or missing a required read/EXECUTE privilege returns 503.
 
 ## Database boundary and migrations
 
@@ -98,7 +103,9 @@ still at M1/M2/M3 or missing a required read/EXECUTE privilege returns 503.
   Runtime cannot directly write wallets/accounts/balances, update sessions,
   read or edit audit events, create schemas/TEMP objects or access migration metadata.
   New functions created by the migrator are not executable by PUBLIC.
-  `payment_worker` remains NOLOGIN until a later approved milestone needs it.
+  `payment_worker` remains NOLOGIN. M5 provisions a separate `payment_worker_login`
+  with inherited membership only in that restricted role; its password is distinct
+  from the API password. Neither runtime receives migration credentials.
 - Downgrading to `base` removes the application schema and its runtime CONNECT
   grants. It intentionally retains cluster-wide roles and restrictive defaults;
   deleting them could affect another database. No `CASCADE` is used.
@@ -143,7 +150,7 @@ and an audit event in one transaction. Uniqueness plus a deferred constraint tri
 require exactly two accounts; a composite FK requires the wallet's currency.
 Balances are BIGINT, initially zero and nonnegative. Runtime has no direct balance
 write permission. M3 adds controlled dev/test opening journals; M4 adds internal
-transfers. Payments remain outside the implemented scope.
+transfers; M5 adds reservations and definitive settlement/release.
 
 Registration and login share an atomic PostgreSQL fixed-window counter per direct
 client IP:
@@ -217,7 +224,8 @@ each delta with a conditional debit; PostgreSQL enforces nonnegative user balanc
 A unique wallet reference permits only one opening. A failed second line, audit,
 commit or overflow rolls everything back. M3 enables only the `opening` journal
 kind; later milestones must add their typed business operations and references.
-No financial function is executable by API/worker. SECURITY DEFINER functions
+In M3, no financial function is executable by API/worker; M4/M5 grant only their
+validated business operations, never the private pair-posting helper. SECURITY DEFINER functions
 fix `search_path=pg_catalog,pg_temp` and fully qualify application objects.
 
 `GET /wallets/{wallet_id}/ledger?limit=50&offset=0` returns only the authenticated
@@ -255,7 +263,8 @@ Migration credentials stay in this local CLI, never in the API process.
 (snapshot) to compare all projected balances to the ledger, verify pairs and
 per-currency conservation, and detect negative user balances. It prints JSON and
 exits 0 for PASS, 1 for inconsistencies, 2 for a database error. It never repairs
-history or balances. Provider/payment reconciliation belongs to later milestones.
+history or balances. M5 performs minimum provider recovery through the worker; the extended external
+reconciliation report and operator runbook remain M6.
 
 An empty M3 ledger supports M3 → M2 → M3. Downgrade refuses a populated ledger,
 preserving financial history. An administrator or compromised migrator can disable
@@ -326,3 +335,84 @@ make reconcile
 
 See [M4 verification](docs/milestone-4-verification.md) and
 [independent review](reviews/M4-review.md) for the recorded evidence.
+
+## Asynchronous outgoing payments (M5)
+
+| Endpoint | Behavior |
+| --- | --- |
+| `POST /payments` | Requires `Idempotency-Key`; reserves funds and always returns 202 for a new payment |
+| `GET /payments/{payment_id}` | Current state of an owned payment; absent/foreign → 404 |
+| `GET /payments?limit=50&offset=0` | Owner-scoped list, newest first |
+
+```json
+{
+  "wallet_id": "<your-wallet-uuid>",
+  "recipient": "merchant-1",
+  "currency": "EUR",
+  "amount_minor": 1500
+}
+```
+
+`recipient` is a fictional destination identifier (1–128 ASCII letters, digits,
+`_ . : @ -`), not bank-routing data. Money uses the same strict integer bounds
+as transfers. PostgreSQL hashes the canonical typed request, including recipient.
+Keys are retained and independently scoped to `payment`; a replay returns the
+original 202 body with `pending` even after completion. Use GET for current state.
+Expected business rejections are retained; a changed payload returns 409.
+
+`0005_payments` creates `payments` and `payment_outbox`. One transaction claims
+idempotency, records payment identity, posts available → reserved, creates the
+unique task, audits and stores the response. No HTTP call occurs in it. Deferred
+checks enforce the reservation/response relationship; a partial unique index
+allows at most one terminal journal, settlement **or** release. Identity and
+terminal state are immutable. Runtime roles cannot directly modify financial
+or outbox tables. M4 history survives upgrades. Downgrade refuses any payment
+idempotency history (including rejected requests), preserving financial evidence.
+
+The worker claims one due task using `FOR UPDATE SKIP LOCKED`, increments a
+lease generation and commits. It always queries provider state first, then may
+submit only after explicit absence, using `payment:<immutable UUID>` every time.
+Both HTTP calls occur without a checked-out database connection. Finalization
+locks outbox then payment, verifies a live lease/generation and locks ledger
+accounts in ascending UUID order. Confirmed success posts reserved → clearing;
+confirmed definitive refusal posts reserved → available. Posting, terminal state,
+outbox completion and audit commit together. Stale generations do nothing.
+
+Timeouts, transport/protocol failures, 5xx, malformed or mismatched evidence are
+unknown outcomes. No unknown outcome releases funds. At most five execution
+claims may submit, with exponential backoff and jitter (initial delays 1–3s,
+then 2–6s, 4–12s, 8–24s). Crashes consume a claim as well. Exhaustion moves to
+`needs_review`, leaves funds reserved, and schedules lookup-only reconciliation
+once per minute. A later definitive provider result may settle/release; absence
+never does, and exhausted payments are never automatically resubmitted. Local
+transaction retries are bounded to three aborted attempts (`40001`/`40P01`);
+ambiguous commits return to durable claim/reconciliation instead of blind replay.
+
+The provider uses SQLite `BEGIN IMMEDIATE`, unique key/payment identity and
+immutable terminal rows, with WAL and FULL synchronization. It commits before
+responding. Reopening the server preserves outcomes; contradictory key/parameters
+return 409. Compose uses a separate persistent volume with a non-root process.
+This fictional provider succeeds by default; tests inject refusal, unavailable,
+timeout-before-execution and timeout-after-acceptance modes without exposing
+fault controls through the payment API. The simulator is a trusted local fixture,
+not a real payment integration. Do not expose it as a public payment provider.
+
+Host worker (after Compose has provisioned the restricted login):
+
+```sh
+uv run --frozen python -m payment_ledger.payments.worker
+make test-payments
+# Dedicated dev/CI cluster only: leaves one funded fictional wallet and payment.
+PAYMENT_LEDGER_DEV_FIXTURES=1 uv run --frozen python -m scripts.smoke_payments
+```
+
+`WORKER_DB_*` settings configure only the worker. Defaults match local Compose:
+port 15432, database `payment_ledger`, provider `http://127.0.0.1:8001`, 3-second
+HTTP socket timeout, 30-second leases, 1-second idle polling. HTTP bodies are
+bounded to 16 KiB. Socket timeouts are not absolute total deadlines for a peer
+that continuously trickles data; the fencing and provider idempotency protections
+still apply to a late worker. Production integration and broad operational
+observability are outside M5.
+
+See [M5 verification](docs/milestone-5-verification.md) and
+[independent review](reviews/M5-review.md) for verification evidence.
