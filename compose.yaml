@@ -18,7 +18,6 @@ services:
       timeout: 3s
       retries: 30
   migrate:
-    build: .
     image: payment-ledger:local
     environment:
       APP_DB_HOST: db
@@ -26,6 +25,7 @@ services:
       APP_DB_NAME: payment_ledger
       MIGRATION_DB_PASSWORD: ${MIGRATION_DB_PASSWORD:?Generate .env with scripts/init_env.py}
       APP_DB_PASSWORD: ${APP_DB_PASSWORD:?Generate .env with scripts/init_env.py}
+      WORKER_DB_PASSWORD: ${WORKER_DB_PASSWORD:?Generate worker secret in .env}
     command: ["sh", "-c", "alembic upgrade head && python scripts/provision_app.py"]
     depends_on:
       db:
@@ -53,5 +53,36 @@ services:
       retries: 12
       start_period: 5s
 
+  provider:
+    image: payment-ledger:local
+    command: ["uvicorn", "payment_ledger.payments.simulator:create_app", "--factory", "--host", "0.0.0.0", "--port", "8001", "--no-proxy-headers"]
+    environment:
+      PROVIDER_DB_PATH: /data/provider.sqlite3
+    volumes:
+      - provider_data:/data
+    ports:
+      - "127.0.0.1:${PROVIDER_PORT:-8001}:8001"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health/live', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+  worker:
+    image: payment-ledger:local
+    command: ["python", "-m", "payment_ledger.payments.worker"]
+    environment:
+      WORKER_DB_HOST: db
+      WORKER_DB_PORT: "5432"
+      WORKER_DB_NAME: payment_ledger
+      WORKER_DB_PASSWORD: ${WORKER_DB_PASSWORD:?Generate worker secret in .env}
+      WORKER_PROVIDER_URL: http://provider:8001
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      provider:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   postgres_data:
+  provider_data:

@@ -37,6 +37,16 @@ def database_is_ready(engine: Engine) -> bool:
                     text(
                         """SELECT current_user = 'payment_app'
                            AND has_schema_privilege(current_user, 'payment', 'USAGE')
+                           AND to_regclass('payment.payments') IS NOT NULL
+                           AND to_regclass('payment.payment_outbox') IS NOT NULL
+                           AND has_table_privilege(
+                               current_user, to_regclass('payment.payments'), 'SELECT'
+                           )
+                           AND has_function_privilege(
+                               current_user, to_regprocedure(
+                                   'payment.create_payment(uuid,text,uuid,text,bigint,text)'
+                               ), 'EXECUTE'
+                           )
                            AND to_regclass('payment.transfers') IS NOT NULL
                            AND to_regclass('payment.idempotency_records') IS NOT NULL
                            AND has_table_privilege(
@@ -44,7 +54,9 @@ def database_is_ready(engine: Engine) -> bool:
                            )
                            AND has_function_privilege(
                                current_user,
-                               to_regprocedure('payment.create_transfer(uuid,text,uuid,uuid,bigint,text)'),
+                               to_regprocedure(
+                                   'payment.create_transfer(uuid,text,uuid,uuid,bigint,text)'
+                               ),
                                'EXECUTE'
                            )
                            AND to_regclass('payment.ledger_journals') IS NOT NULL

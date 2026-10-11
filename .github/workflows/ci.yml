@@ -29,7 +29,7 @@ jobs:
           python scripts/init_env.py
           while IFS='=' read -r name value; do
             case "$name" in
-              POSTGRES_PASSWORD|MIGRATION_DB_PASSWORD|APP_DB_PASSWORD)
+              POSTGRES_PASSWORD|MIGRATION_DB_PASSWORD|APP_DB_PASSWORD|WORKER_DB_PASSWORD)
                 printf '::add-mask::%s\n' "$value"
                 ;;
             esac
@@ -45,6 +45,7 @@ jobs:
           curl --fail --silent http://127.0.0.1:8000/health/live
           curl --fail --silent http://127.0.0.1:8000/health/ready
           uv run --frozen python scripts/smoke_api.py
+          PAYMENT_LEDGER_DEV_FIXTURES=1 uv run --frozen python -m scripts.smoke_payments
       - name: Container diagnostics on failure
         if: failure()
         run: docker compose logs --no-color

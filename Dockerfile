@@ -15,6 +15,7 @@ COPY --from=build /app/.venv /app/.venv
 COPY alembic.ini ./
 COPY migrations ./migrations
 COPY scripts/provision_app.py ./scripts/provision_app.py
+RUN mkdir /data && chown app:app /data
 USER app
 EXPOSE 8000
 CMD ["uvicorn", "payment_ledger.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--no-proxy-headers"]

@@ -29,4 +29,6 @@ def test_openapi_documents_unavailable_response() -> None:
         "/wallets/{wallet_id}/ledger",
         "/transfers",
         "/transfers/{transfer_id}",
+        "/payments",
+        "/payments/{payment_id}",
     }

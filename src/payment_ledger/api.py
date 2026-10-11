@@ -21,6 +21,8 @@ from payment_ledger.errors import (
 )
 from payment_ledger.health import get_database_engine
 from payment_ledger.ledger.history import HistoryEntry, history
+from payment_ledger.payments import service as payments
+from payment_ledger.payments.schemas import PaymentRequest, PaymentResponse
 from payment_ledger.schemas import (
     LoginRequest,
     RegistrationRequest,
@@ -166,6 +168,36 @@ def list_transfers(
     offset: Annotated[int, Query(ge=0, le=1000000)] = 0,
 ) -> list[TransferResponse]:
     return transfers.list_transfers(engine, user.id, limit, offset)
+
+
+@router.post("/payments", status_code=202, response_model=PaymentResponse)
+def create_payment(
+    request: PaymentRequest,
+    user: UserDependency,
+    engine: EngineDependency,
+    idempotency_key: Annotated[str, Header(min_length=1, max_length=128, pattern=r"^[!-~]+$")],
+) -> JSONResponse:
+    result = payments.create_payment(engine, user.id, idempotency_key, request)
+    return JSONResponse(
+        status_code=result.status_code, content=result.body, headers={"Cache-Control": "no-store"}
+    )
+
+
+@router.get("/payments/{payment_id}")
+def get_payment(
+    payment_id: UUID, user: UserDependency, engine: EngineDependency
+) -> PaymentResponse:
+    return payments.get_payment(engine, user.id, payment_id)
+
+
+@router.get("/payments")
+def list_payments(
+    user: UserDependency,
+    engine: EngineDependency,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0, le=1000000)] = 0,
+) -> list[PaymentResponse]:
+    return payments.list_payments(engine, user.id, limit, offset)
 
 
 def install_error_handlers(app: FastAPI) -> None:
