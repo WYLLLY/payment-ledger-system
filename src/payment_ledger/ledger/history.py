@@ -14,7 +14,7 @@ class HistoryEntry(BaseModel):
     journal_id: UUID
     account_id: UUID
     account_kind: Literal["available", "reserved"]
-    kind: Literal["opening"]
+    kind: Literal["opening", "transfer"]
     currency: Literal["EUR", "USD", "JPY"]
     amount_minor: int
     created_at: datetime
