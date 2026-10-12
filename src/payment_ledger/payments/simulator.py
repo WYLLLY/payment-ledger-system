@@ -9,6 +9,7 @@ from typing import Annotated, Literal
 
 from fastapi import FastAPI, Header, HTTPException
 
+from payment_ledger.observability import RequestLogging, configure_logging
 from payment_ledger.payments.provider import ProviderRequest
 
 Mode = Literal["success", "decline", "timeout_before", "timeout_after", "unavailable"]
@@ -70,7 +71,9 @@ class ProviderStore:
 
 def create_simulator(path: Path, *, mode: Mode = "success", delay: float = 5.0) -> FastAPI:
     store = ProviderStore(path)
+    configure_logging()
     app = FastAPI(title="Fictional payment provider")
+    app.add_middleware(RequestLogging)
 
     @app.get("/health/live")
     def live() -> dict[str, str]:

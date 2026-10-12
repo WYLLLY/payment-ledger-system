@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     auth_rate_limit: int = Field(default=20, ge=1, le=1000)
     auth_rate_window_seconds: int = Field(default=60, ge=1, le=3600)
 
+    financial_rate_limit: int = Field(default=60, ge=1, le=1000)
+    financial_rate_window_seconds: int = Field(default=60, ge=1, le=3600)
+
     def database_url(self) -> URL:
         return URL.create(
             "postgresql+psycopg",

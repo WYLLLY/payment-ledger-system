@@ -11,7 +11,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
-from payment_ledger import services
+from payment_ledger import rate_limit, services
 from payment_ledger.config import Settings
 from payment_ledger.errors import (
     AlreadyExists,
@@ -21,6 +21,7 @@ from payment_ledger.errors import (
 )
 from payment_ledger.health import get_database_engine
 from payment_ledger.ledger.history import HistoryEntry, history
+from payment_ledger.observability import logger
 from payment_ledger.payments import service as payments
 from payment_ledger.payments.schemas import PaymentRequest, PaymentResponse
 from payment_ledger.schemas import (
@@ -145,8 +146,17 @@ def create_transfer(
     request: TransferRequest,
     user: UserDependency,
     engine: EngineDependency,
+    settings: SettingsDependency,
     idempotency_key: Annotated[str, Header(min_length=1, max_length=128, pattern=r"^[!-~]+$")],
 ) -> JSONResponse:
+    rate_limit.enforce(
+        engine,
+        user.id,
+        "transfer",
+        idempotency_key,
+        settings.financial_rate_limit,
+        settings.financial_rate_window_seconds,
+    )
     result = transfers.create_transfer(engine, user.id, idempotency_key, request)
     return JSONResponse(
         status_code=result.status_code, content=result.body, headers={"Cache-Control": "no-store"}
@@ -175,9 +185,20 @@ def create_payment(
     request: PaymentRequest,
     user: UserDependency,
     engine: EngineDependency,
+    settings: SettingsDependency,
     idempotency_key: Annotated[str, Header(min_length=1, max_length=128, pattern=r"^[!-~]+$")],
 ) -> JSONResponse:
+    rate_limit.enforce(
+        engine,
+        user.id,
+        "payment",
+        idempotency_key,
+        settings.financial_rate_limit,
+        settings.financial_rate_window_seconds,
+    )
     result = payments.create_payment(engine, user.id, idempotency_key, request)
+    if result.status_code == 202:
+        logger.info("payment_created_or_replayed", extra={"payment_id": result.body["id"]})
     return JSONResponse(
         status_code=result.status_code, content=result.body, headers={"Cache-Control": "no-store"}
     )
@@ -221,7 +242,11 @@ def install_error_handlers(app: FastAPI) -> None:
     async def rate_error(request: Request, error: RateLimitExceeded) -> JSONResponse:
         return JSONResponse(
             status_code=429,
-            content={"detail": "Too many authentication attempts"},
+            content={
+                "detail": "Too many financial requests"
+                if isinstance(error, rate_limit.FinancialRateLimitExceeded)
+                else "Too many authentication attempts"
+            },
             headers={"Retry-After": str(error.retry_after), "Cache-Control": "no-store"},
         )
 

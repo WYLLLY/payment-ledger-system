@@ -56,6 +56,7 @@ class ProviderClient:
             headers={
                 "Content-Type": "application/json",
                 "Idempotency-Key": payment.provider_key,
+                "X-Request-ID": str(payment.payment_id),
             },
         )
         try:

@@ -6,12 +6,13 @@ from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from payment_ledger.config import Settings
+from payment_ledger.observability import correlate_transactions
 
 logger = logging.getLogger(__name__)
 
 
 def create_database_engine(settings: Settings) -> Engine:
-    return create_engine(
+    engine = create_engine(
         settings.database_url(),
         isolation_level="READ COMMITTED",
         pool_pre_ping=True,
@@ -28,6 +29,9 @@ def create_database_engine(settings: Settings) -> Engine:
         },
     )
 
+    correlate_transactions(engine)
+    return engine
+
 
 def database_is_ready(engine: Engine) -> bool:
     try:
@@ -37,6 +41,10 @@ def database_is_ready(engine: Engine) -> bool:
                     text(
                         """SELECT current_user = 'payment_app'
                            AND has_schema_privilege(current_user, 'payment', 'USAGE')
+                           AND to_regclass('payment.financial_rate_limits') IS NOT NULL
+                           AND has_function_privilege(current_user, to_regprocedure(
+                               'payment.take_financial_slot(uuid,text,text,integer,integer)'
+                           ), 'EXECUTE')
                            AND to_regclass('payment.payments') IS NOT NULL
                            AND to_regclass('payment.payment_outbox') IS NOT NULL
                            AND has_table_privilege(
