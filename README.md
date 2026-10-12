@@ -1,11 +1,13 @@
 # Payment & Ledger System
 
-Milestones 1–5: FastAPI, PostgreSQL, identity, opaque sessions, wallets and an
+Milestones 1–6: FastAPI, PostgreSQL, identity, opaque sessions, wallets and an
 immutable double-entry ledger with fixed dev/test openings and internal reconciliation.
 Atomic internal transfers use retained idempotency responses and ordered account locks.
 Asynchronous outgoing payments use atomic reservations, a fenced outbox worker
 and a persistent HTTP simulator. The [approved revised plan](docs/approved-plan.md)
-defines the scope; M6 remains unimplemented.
+defines the scope. M6 adds audited operator recovery, internal/external reconciliation,
+JSON correlation logs, internal payment metrics and PostgreSQL financial rate limits.
+See the [operations runbook](docs/operations-runbook.md).
 
 ## Run locally
 
@@ -32,7 +34,7 @@ before starting M5; existing settings are preserved.
 To run the API on the host after starting the database and migrations:
 
 ```sh
-uv run --frozen uvicorn payment_ledger.main:create_app --factory --no-proxy-headers
+uv run --frozen uvicorn payment_ledger.main:create_app --factory --no-proxy-headers --no-access-log
 ```
 
 Stop the stack with `docker compose down`. Adding `--volumes` **deletes its local
@@ -62,6 +64,9 @@ src/payment_ledger/
   ledger/         owner-scoped history and read-only internal reconciliation
   transfers/      validated transfer contracts and transactional service
   payments/       reservation service, fenced worker and HTTP/SQLite simulator
+  operations/     restricted operator CLI and reconciliation reports
+  observability.py JSON events and request/transaction correlation
+  rate_limit.py   durable per-user financial admission
 migrations/       versioned schema and privilege changes
 docker/           administrator bootstrap for a fresh PostgreSQL volume
 scripts/          local secret generation and runtime credential provisioning
@@ -75,14 +80,14 @@ transactions; no repository interfaces or speculative class hierarchy are needed
 This keeps responsibilities and dependencies explicit.
 
 `GET /health/live` reports process liveness without a database connection.
-`GET /health/ready` checks connectivity as `payment_app`, the M2–M5 tables, required
-column/table permissions and EXECUTE grants on M2/M4/M5 functions. It
+`GET /health/ready` checks connectivity as `payment_app`, the M2–M6 tables, required
+column/table permissions and EXECUTE grants on M2/M4/M5/M6 functions. It
 returns 200 with `{"status":"ok"}` or a generic 503 with
 `{"status":"unavailable"}`. Errors are not echoed to clients or logs. Readiness
 configures connect, server-side statement and pool wait timeouts. These are not an
 absolute network deadline: an established TCP connection with a nonresponsive
 peer can outlast them. The container probe has its own process timeout. A database
-still at M1/M2/M3/M4 or missing a required read/EXECUTE privilege returns 503.
+still at M1/M2/M3/M4/M5 or missing a required read/EXECUTE privilege returns 503.
 
 ## Database boundary and migrations
 
