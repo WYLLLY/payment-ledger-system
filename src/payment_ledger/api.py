@@ -4,7 +4,7 @@ from typing import Annotated, cast
 from uuid import UUID
 
 from argon2.exceptions import InvalidHashError, VerificationError
-from fastapi import APIRouter, Depends, FastAPI, Query, Request, Response
+from fastapi import APIRouter, Depends, FastAPI, Header, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -29,6 +29,8 @@ from payment_ledger.schemas import (
     WalletRequest,
     WalletResponse,
 )
+from payment_ledger.transfers import service as transfers
+from payment_ledger.transfers.schemas import TransferRequest, TransferResponse
 
 router = APIRouter()
 EngineDependency = Annotated[Engine, Depends(get_database_engine)]
@@ -126,6 +128,44 @@ def wallet_history(
     offset: Annotated[int, Query(ge=0, le=1000000)] = 0,
 ) -> list[HistoryEntry]:
     return history(engine, user.id, wallet_id, limit, offset)
+
+
+@router.post(
+    "/transfers",
+    status_code=201,
+    response_model=TransferResponse,
+    responses={
+        404: {"description": "Resource not found"},
+        409: {"description": "Key conflict or insufficient funds"},
+    },
+)
+def create_transfer(
+    request: TransferRequest,
+    user: UserDependency,
+    engine: EngineDependency,
+    idempotency_key: Annotated[str, Header(min_length=1, max_length=128, pattern=r"^[!-~]+$")],
+) -> JSONResponse:
+    result = transfers.create_transfer(engine, user.id, idempotency_key, request)
+    return JSONResponse(
+        status_code=result.status_code, content=result.body, headers={"Cache-Control": "no-store"}
+    )
+
+
+@router.get("/transfers/{transfer_id}")
+def get_transfer(
+    transfer_id: UUID, user: UserDependency, engine: EngineDependency
+) -> TransferResponse:
+    return transfers.get_transfer(engine, user.id, transfer_id)
+
+
+@router.get("/transfers")
+def list_transfers(
+    user: UserDependency,
+    engine: EngineDependency,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0, le=1000000)] = 0,
+) -> list[TransferResponse]:
+    return transfers.list_transfers(engine, user.id, limit, offset)
 
 
 def install_error_handlers(app: FastAPI) -> None:

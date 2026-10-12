@@ -1,9 +1,10 @@
 # Payment & Ledger System
 
-Milestones 1–3: FastAPI, PostgreSQL, identity, opaque sessions, wallets and an
+Milestones 1–4: FastAPI, PostgreSQL, identity, opaque sessions, wallets and an
 immutable double-entry ledger with fixed dev/test openings and internal reconciliation.
-The [approved revised plan](docs/approved-plan.md) defines the scope. Transfers
-(M4), payments and workers are not implemented.
+Atomic internal transfers use retained idempotency responses and ordered account locks.
+The [approved revised plan](docs/approved-plan.md) defines the scope. Payments
+and workers (M5) are not implemented.
 
 ## Run locally
 
@@ -55,6 +56,7 @@ src/payment_ledger/
   models.py       SQLAlchemy persistence mappings; migrations own DDL
   errors.py       application errors translated by the HTTP layer
   ledger/         owner-scoped history and read-only internal reconciliation
+  transfers/      validated transfer contracts and transactional service
 migrations/       versioned schema and privilege changes
 docker/           administrator bootstrap for a fresh PostgreSQL volume
 scripts/          local secret generation and runtime credential provisioning
@@ -68,14 +70,14 @@ transactions; no repository interfaces or speculative class hierarchy are needed
 This keeps responsibilities and dependencies explicit.
 
 `GET /health/live` reports process liveness without a database connection.
-`GET /health/ready` checks connectivity as `payment_app`, the M2/M3 tables, required
-column/table permissions and EXECUTE grants on M2 functions. It
+`GET /health/ready` checks connectivity as `payment_app`, the M2–M4 tables, required
+column/table permissions and EXECUTE grants on M2/M4 functions. It
 returns 200 with `{"status":"ok"}` or a generic 503 with
 `{"status":"unavailable"}`. Errors are not echoed to clients or logs. Readiness
 configures connect, server-side statement and pool wait timeouts. These are not an
 absolute network deadline: an established TCP connection with a nonresponsive
 peer can outlast them. The container probe has its own process timeout. A database
-still at M1/M2 or missing a required read/EXECUTE privilege returns 503.
+still at M1/M2/M3 or missing a required read/EXECUTE privilege returns 503.
 
 ## Database boundary and migrations
 
@@ -140,8 +142,8 @@ Registration's 409 intentionally reveals that a normalized email already exists.
 and an audit event in one transaction. Uniqueness plus a deferred constraint trigger
 require exactly two accounts; a composite FK requires the wallet's currency.
 Balances are BIGINT, initially zero and nonnegative. Runtime has no direct balance
-write permission. M3 adds controlled dev/test opening journals; transfers and
-payments remain outside this milestone.
+write permission. M3 adds controlled dev/test opening journals; M4 adds internal
+transfers. Payments remain outside the implemented scope.
 
 Registration and login share an atomic PostgreSQL fixed-window counter per direct
 client IP:
@@ -189,8 +191,9 @@ probes the running HTTP server. CI generates its own ephemeral credentials and
 removes its volumes. Pull requests run the same verification.
 
 The HTTP smoke script targets the local Compose API on port 8000. It checks the
-identity/wallet/ownership/logout flow and leaves two dummy users and one zero-balance
-wallet; its sessions are revoked. Run it only against the development stack.
+identity/wallet/ownership/logout flow and transfer rejection/replay/conflict; it leaves
+two dummy users, two zero-balance wallets and one retained idempotency record; its
+sessions are revoked. Run it only against the development stack.
 
 See [Milestone 1 verification](docs/milestone-1-verification.md) for commands,
 observed results, independent review and remaining limitations.
@@ -259,3 +262,67 @@ preserving financial history. An administrator or compromised migrator can disab
 triggers/change schema; these guarantees intentionally exclude that trust boundary.
 
 See [Milestone 3 verification](docs/milestone-3-verification.md) for evidence.
+
+## Atomic internal transfers (M4)
+
+| Endpoint | Behavior |
+| --- | --- |
+| `POST /transfers` | Atomic transfer; requires `Idempotency-Key`, returns 201 |
+| `GET /transfers/{transfer_id}` | Transfer initiated by the authenticated user; otherwise 404 |
+| `GET /transfers?limit=50&offset=0` | Paginated transfers initiated by that user |
+
+Request body:
+
+```json
+{
+  "source_wallet_id": "<your-wallet-uuid>",
+  "destination_wallet_id": "<recipient-wallet-uuid>",
+  "currency": "EUR",
+  "amount_minor": 1500
+}
+```
+
+Amounts must be JSON integers from 1 through 1,000,000,000,000 minor units;
+booleans, floats and numeric strings are rejected. Wallets must be distinct and
+use the requested currency. Only the source owner can initiate the transfer;
+recipients see their credit through their own ledger history. Requests and reads
+of an unauthorized source/transfer return the same 404 as an absent resource.
+There is no currency conversion or direct reserved-account access.
+
+Keys contain 1–128 visible ASCII characters, scoped to `(user_id, operation_kind,
+key)`. PostgreSQL computes SHA-256 over canonical JSONB containing version 1, typed
+source/destination UUIDs, integer amount and currency. Equivalent UUID spelling or
+JSON field order does not change the hash. Concurrent duplicates wait on database
+uniqueness and then return the exact stored status/body. An identical replay returns
+201 and the original transfer ID/timestamp/journal ID; a changed payload returns 409.
+
+The claim, transfer, journal, two lines, projected balances, audit and stored response
+commit together. Expected business rejections (404, 409, 422) are also retained:
+a rejected insufficient-funds request remains rejected after a later credit; use a
+new key for a new attempt. Authentication/request-shape validation happens before
+claiming the key. Technical errors roll back the claim and every monetary effect.
+A 503 or lost response can be retried by the client using the **same** key.
+
+The service retries the complete local transaction at most three attempts, only
+for PostgreSQL deadlock/serialization-abort SQLSTATEs `40P01` and `40001`. It never
+blindly retries connection loss or ambiguous commits. Account locks follow the
+idempotency lock and are taken individually in ascending UUID order; balances are
+read again after lock acquisition. A private pair-posting function is shared by
+openings and transfers. Conditional debits, nonnegative CHECKs, pair triggers,
+unique references and deferred transfer/idempotency completeness checks protect
+financial state. Neither runtime nor dev roles can directly modify these tables
+or call the private posting helper. Completed transfers and idempotency responses
+are immutable and retained.
+
+`0004_transfers` preserves existing M3 openings. An empty M4 schema supports
+M4 → M3 → M4; downgrade refuses any retained transfer/idempotency history, including
+rejected requests. No cleanup deletes financial keys. Reconciliation remains read-only.
+
+```sh
+make test-transfers
+make test
+make reconcile
+```
+
+See [M4 verification](docs/milestone-4-verification.md) and
+[independent review](reviews/M4-review.md) for the recorded evidence.
