@@ -48,6 +48,8 @@ def provision_dev_role(connection: psycopg.Connection[tuple[object, ...]]) -> No
                 RAISE EXCEPTION 'unsafe dev role attributes or memberships';
             END IF;
         END $$;
+        -- Role creation/admin membership does not guarantee SET on fresh PostgreSQL.
+        GRANT payment_dev TO payment_migrator WITH SET TRUE;
         GRANT USAGE ON SCHEMA payment TO payment_dev;
         GRANT EXECUTE ON FUNCTION payment.open_fixture_wallet(uuid, uuid) TO payment_dev;
     """)
@@ -122,8 +124,6 @@ def main() -> int:
             connect_timeout=3,
         ) as connection:
             provision_dev_role(connection)
-            # PG17 grants role creator ADMIN/SET membership; ensure SET for reused roles.
-            connection.execute("GRANT payment_dev TO payment_migrator WITH SET TRUE")
             connection.execute(
                 sql.SQL("GRANT CONNECT ON DATABASE {} TO payment_dev").format(
                     sql.Identifier(settings.db_name)
