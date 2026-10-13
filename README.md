@@ -9,12 +9,16 @@ This is not a payment processor or a Stripe clone.
 
 ## Project status
 
-All six approved milestones are implemented and verified on `feature/m6-resilience`.
-M1–M5 are merged into `main`. M6 is approved and remains in
-[PR #4](https://github.com/WYLLLY/payment-ledger-system/pull/4), pending explicit merge
-authorization. The maintained suite contains **317 tests: 31 unit and 286 integration**.
-See the [final verification record](docs/final-verification.md) for the tested revision,
-clean installation, CI, secret checks and remaining limitations.
+All six approved milestones are complete, approved and merged into `main`.
+[M6 was merged in PR #4](https://github.com/WYLLLY/payment-ledger-system/pull/4).
+The complete suite passes on the merged revision: **317 tests, 0 failed, 0 skipped**
+(31 unit and 286 integration). [Verified main CI run](https://github.com/WYLLLY/payment-ledger-system/actions/runs/38442168726).
+
+Start with the [portfolio case study](docs/portfolio-case-study.md) for the engineering
+problem, design decisions and evidence. The [technical architecture](docs/architecture.md)
+and [final verification record](docs/final-verification.md) provide implementation and
+validation details. [Independent reviews](reviews/README.md) retain their original scope
+and results.
 
 ## What it does
 
@@ -58,10 +62,10 @@ is the architectural source of truth; its original approved text is preserved.
 
 Requirements: Python 3.14, uv 0.12.23, Docker Engine and Docker Compose v2 or later.
 Use a dedicated development/test PostgreSQL cluster. Repository access is required.
-Until M6 is merged, check out its branch explicitly:
+Clone the completed project from `main`:
 
 ```sh
-git clone --branch feature/m6-resilience https://github.com/WYLLLY/payment-ledger-system.git
+git clone --branch main https://github.com/WYLLLY/payment-ledger-system.git
 cd payment-ledger-system
 uv sync --frozen
 python3 scripts/init_env.py
@@ -196,13 +200,14 @@ is 317, not the larger combined count from temporary review experiments.
 
 ## Documentation and source layout
 
+- [Portfolio case study](docs/portfolio-case-study.md): engineering decisions, evidence and demo guide.
 - [Technical architecture](docs/architecture.md): transactions, financial invariants and roles.
 - [Operations runbook](docs/operations-runbook.md): diagnostics, incidents and safe recovery.
 - [Final verification](docs/final-verification.md): clean install, checks and repository state.
 - Milestone evidence: [M1](docs/milestone-1-verification.md), [M2](docs/milestone-2-verification.md),
   [M3](docs/milestone-3-verification.md), [M4](docs/milestone-4-verification.md),
   [M5](docs/milestone-5-verification.md), [M6](docs/milestone-6-verification.md).
-- [Independent M6 review](reviews/M6-review.md).
+- [Independent reviews](reviews/README.md): milestone and final audit reports, with historical test counts.
 
 `src/payment_ledger/` contains the API, identity services, `ledger/`, `transfers/`,
 `payments/` and `operations/`. Versioned schema/privileges live in `migrations/`;
