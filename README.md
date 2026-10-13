@@ -1,418 +1,211 @@
 # Payment & Ledger System
 
-Milestones 1–5: FastAPI, PostgreSQL, identity, opaque sessions, wallets and an
-immutable double-entry ledger with fixed dev/test openings and internal reconciliation.
-Atomic internal transfers use retained idempotency responses and ordered account locks.
-Asynchronous outgoing payments use atomic reservations, a fenced outbox worker
-and a persistent HTTP simulator. The [approved revised plan](docs/approved-plan.md)
-defines the scope; M6 remains unimplemented.
+A backend portfolio project demonstrating transactional money movement, PostgreSQL
+invariants, idempotency and recovery from partial failures. Built with Python 3.14,
+FastAPI, SQLAlchemy 2 and Alembic. All funds and the external provider are fictional.
 
-## Run locally
+Supports EUR, USD and JPY as integer minor units, without currency conversion.
+This is not a payment processor or a Stripe clone.
 
-Requirements: Python 3.14, uv 0.12.23, Docker Engine with Docker Compose v2 or later.
+## Project status
+
+All six approved milestones are implemented and verified on `feature/m6-resilience`.
+M1–M5 are merged into `main`. M6 is approved and remains in
+[PR #4](https://github.com/WYLLLY/payment-ledger-system/pull/4), pending explicit merge
+authorization. The maintained suite contains **317 tests: 31 unit and 286 integration**.
+See the [final verification record](docs/final-verification.md) for the tested revision,
+clean installation, CI, secret checks and remaining limitations.
+
+## What it does
+
+- Registration, Argon2id passwords, opaque hashed sessions, login/logout and ownership checks.
+- One wallet per user/currency, each with an available and a reserved ledger account.
+- Immutable double-entry journals and atomically maintained balances, enforced by PostgreSQL.
+- Internal transfers with retained idempotency responses and deterministic account locking.
+- Outgoing payments with atomic reservation/outbox creation, asynchronous execution and recovery.
+- Persistent provider idempotency, bounded retries, lease generations and `needs_review`.
+- Read-only internal/external reconciliation, restricted audited operator commands and runbooks.
+- JSON logs, correlation IDs, internal operational metrics and PostgreSQL rate limiting.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    Client --> API[FastAPI API]
+    API --> PG[(PostgreSQL: identity, ledger, payments, outbox, audit)]
+    Worker[Outbox worker] --> PG
+    Worker --> Provider[HTTP provider simulator]
+    Provider --> SQLite[(Provider SQLite volume)]
+    Operator[Restricted operator CLI] --> PG
+    Operator --> Provider
+```
+
+The API and worker share one application and PostgreSQL database. SQLite belongs only
+to the independently persistent provider simulator. No Redis, Kafka, microservices or
+distributed transaction is needed. External HTTP calls occur after local transactions close.
+
+A transfer commits its idempotency record, business operation, journal, balance changes,
+audit and stored response together. A payment initially moves `available → reserved` and
+creates its outbox task atomically. A worker later posts `reserved → clearing` on confirmed
+success, or `reserved → available` on confirmed refusal. An unknown outcome keeps funds
+reserved. A payment cannot have both a settlement and a release journal.
+
+Read the [technical architecture](docs/architecture.md) for invariants, transaction
+boundaries, state transitions and role privileges. The [approved plan](docs/approved-plan.md)
+is the architectural source of truth; its original approved text is preserved.
+
+## Install and run
+
+Requirements: Python 3.14, uv 0.12.23, Docker Engine and Docker Compose v2 or later.
+Use a dedicated development/test PostgreSQL cluster. Repository access is required.
+Until M6 is merged, check out its branch explicitly:
 
 ```sh
-python3 scripts/init_env.py
+git clone --branch feature/m6-resilience https://github.com/WYLLLY/payment-ledger-system.git
+cd payment-ledger-system
 uv sync --frozen
+python3 scripts/init_env.py
 docker compose config --quiet
 docker compose up --build --wait --wait-timeout 180
 curl --fail http://127.0.0.1:8000/health/live
 curl --fail http://127.0.0.1:8000/health/ready
 ```
 
-`init_env.py` creates independent random passwords in a mode-0600, ignored `.env`
-and refuses to overwrite an existing file. `.env.example` documents the variables
-without usable credentials. PostgreSQL is exposed on loopback port 15432; the API
-on loopback port 8000. Compose waits for PostgreSQL, runs migrations and provisions
-the API and worker passwords, then starts the API and worker. PostgreSQL and
-provider SQLite volumes persist. The simulated provider is exposed on loopback 8001.
-For an existing M4 `.env`, run `python3 scripts/init_env.py --add-worker-secret`
-before starting M5; existing settings are preserved.
+`init_env.py` creates independent random secrets in an ignored, mode-0600 `.env` and
+refuses to overwrite it. Do not copy placeholder credentials from `.env.example`.
+Compose starts PostgreSQL, applies migrations using the separate migrator, provisions
+restricted API/worker logins, then starts the API, worker and provider. PostgreSQL and
+provider data use separate persistent volumes. Neither runtime receives migration secrets.
 
-To run the API on the host after starting the database and migrations:
+| Local interface | Address |
+| --- | --- |
+| API and OpenAPI UI | `http://127.0.0.1:8000/docs` |
+| API liveness / readiness | `/health/live` / `/health/ready` |
+| PostgreSQL | `127.0.0.1:15432` |
+| Fictional provider | `http://127.0.0.1:8001` |
+
+Readiness verifies schema objects and required runtime privileges, including M6 admission.
+It returns 503 for an unavailable/incomplete database. The worker has no application
+healthcheck; inspect its logs, outbox metrics and actual payment progress.
+
+For an existing M4 environment, add the separate worker secret before upgrading:
+`python3 scripts/init_env.py --add-worker-secret`. Normal startup migrates an existing
+M5 database to M6; serialize migration execution. Changing `.env` alone does not rotate
+passwords on an existing PostgreSQL volume.
+
+Stop with `docker compose down`; data remains. `docker compose down --volumes` deletes
+that Compose project's databases and is appropriate only for disposable verification data.
+Do not delete volumes to recover a payment. On the development Mac, use the dedicated
+profile: `colima start --profile payment-ledger --activate=false`, then
+`DOCKER_CONTEXT=colima-payment-ledger docker-compose ...`.
+
+## API contracts
+
+| Area | Routes |
+| --- | --- |
+| Identity | `POST /auth/register`, `/auth/login`, `/auth/logout`; `GET /users/me` |
+| Wallets | `POST /wallets`; `GET /wallets`, `/wallets/{id}`, `/wallets/{id}/ledger` |
+| Transfers | `POST /transfers`; `GET /transfers`, `/transfers/{id}` |
+| Payments | `POST /payments`; `GET /payments`, `/payments/{id}` |
+
+Protected routes require `Authorization: Bearer <session-token>`. Foreign resources and
+missing resources both return 404. The generated OpenAPI UI documents request schemas.
+
+Financial POSTs require a 1–128 character visible-ASCII `Idempotency-Key`. Keys are scoped
+by user and operation kind and retained with the canonical request hash and original
+response. Same key/payload returns the original result; a changed payload returns 409.
+Expected business rejections are retained too. Retry a lost response with the same key.
+
+Amounts must be JSON integers in `1..1_000_000_000_000`; booleans, floats and numeric strings
+are rejected. Transfers require distinct wallets with the same currency. Payment recipients
+are fictional identifiers, not bank details. A new transfer returns 201; a new payment
+returns 202 with `pending`. Replaying a payment returns its original 202 response even
+if it has completed: use GET for current state.
+
+Financial POST admission defaults to 60 requests per 60 seconds per authenticated user
+and operation kind. Exhaustion returns 429 and `Retry-After`. Already committed keys
+retain replay/conflict behavior at quota. Authentication has its own 20-per-60-second
+counter per direct client IP. Configure bounded values using the `APP_*` variables in
+`.env.example`. Forwarded headers are not trusted by the provided server commands.
+
+## Development funding and verification
+
+A new wallet starts at zero. There is no funding HTTP endpoint. Fixed opening fixtures
+require an explicit dev/test opt-in and a separate restricted role; normal migrations
+and demonstration startup do not grant funding capabilities to the API or worker.
 
 ```sh
-uv run --frozen uvicorn payment_ledger.main:create_app --factory --no-proxy-headers
+# Dedicated dev/test environment only; supply DEMO_PASSWORD without committing it.
+PAYMENT_LEDGER_DEV_FIXTURES=1 uv run --frozen python scripts/seed_demo.py
 ```
 
-Stop the stack with `docker compose down`. Adding `--volumes` **deletes its local
-database**. The database initialization script runs only for a fresh volume;
-changing `.env` does not rotate credentials on an existing database. Keep the
-existing `.env`, or perform an explicit credential rotation with an administrator.
+The fixed demo users receive EUR/USD/JPY wallets. Opening amounts are fixed by the
+fixture function, and reruns do not duplicate funds. See the technical architecture
+for the fixture privilege boundary. Never run funding fixtures on a demonstration deployment.
 
-On this Mac, the verification engine uses the separate Colima profile
-`payment-ledger`: `DOCKER_CONTEXT=colima-payment-ledger docker-compose ...` with
-Homebrew's `/opt/homebrew/bin` on PATH. This does not change the default Docker
-context. Restart it with `colima start --profile payment-ledger --activate=false`.
-
-## Package boundaries
-
-```text
-src/payment_ledger/
-  config.py       typed runtime settings and safe SQLAlchemy URL construction
-  database.py     engine creation, connection timeouts and readiness probe
-  health.py       HTTP routes, response schema and request dependency
-  main.py         application factory and engine lifecycle
-  api.py          identity and wallet HTTP routes, dependencies and safe errors
-  services.py     application operations and transaction boundaries
-  security.py     Argon2id passwords, random tokens and token hashing
-  schemas.py      request validation and explicit response models
-  models.py       SQLAlchemy persistence mappings; migrations own DDL
-  errors.py       application errors translated by the HTTP layer
-  ledger/         owner-scoped history and read-only internal reconciliation
-  transfers/      validated transfer contracts and transactional service
-  payments/       reservation service, fenced worker and HTTP/SQLite simulator
-migrations/       versioned schema and privilege changes
-docker/           administrator bootstrap for a fresh PostgreSQL volume
-scripts/          local secret generation and runtime credential provisioning
-tests/unit/       configuration and HTTP contracts without PostgreSQL
-tests/integration/ real PostgreSQL, role privileges and migration lifecycle
-```
-
-Modules have focused responsibilities. The engine is injected through FastAPI's
-request dependency and disposed at application shutdown. Application services own
-transactions; no repository interfaces or speculative class hierarchy are needed.
-This keeps responsibilities and dependencies explicit.
-
-`GET /health/live` reports process liveness without a database connection.
-`GET /health/ready` checks connectivity as `payment_app`, the M2–M5 tables, required
-column/table permissions and EXECUTE grants on M2/M4/M5 functions. It
-returns 200 with `{"status":"ok"}` or a generic 503 with
-`{"status":"unavailable"}`. Errors are not echoed to clients or logs. Readiness
-configures connect, server-side statement and pool wait timeouts. These are not an
-absolute network deadline: an established TCP connection with a nonresponsive
-peer can outlast them. The container probe has its own process timeout. A database
-still at M1/M2/M3/M4 or missing a required read/EXECUTE privilege returns 503.
-
-## Database boundary and migrations
-
-- PostgreSQL 17 is the supported server for this milestone; SQLAlchemy uses
-  `READ COMMITTED` with psycopg 3.
-- The administrator bootstrap creates `payment_migrator`, a non-superuser with
-  `CREATEROLE`, and makes it database owner. This prerequisite cannot be created
-  by a migration that must itself authenticate as that role.
-- Alembic revision `0001_foundation` creates `payment_app`, `payment_worker` and
-  the empty `payment` schema. Existing role attributes and memberships are
-  checked before reuse. Use a dedicated project cluster: roles are cluster-wide.
-- Only the separate migration container receives migration credentials. The API
-  configuration fixes its username to `payment_app` and receives only its password.
-  Password provisioning happens after the migration, outside migration source.
-- M1 grants runtime database CONNECT and schema USAGE. M2 adds only the API's
-  required reads, column-level inserts for users, sessions and audit events, and
-  execution of wallet creation, session revocation and auth-counter functions.
-  Runtime cannot directly write wallets/accounts/balances, update sessions,
-  read or edit audit events, create schemas/TEMP objects or access migration metadata.
-  New functions created by the migrator are not executable by PUBLIC.
-  `payment_worker` remains NOLOGIN. M5 provisions a separate `payment_worker_login`
-  with inherited membership only in that restricted role; its password is distinct
-  from the API password. Neither runtime receives migration credentials.
-- Downgrading to `base` removes the application schema and its runtime CONNECT
-  grants. It intentionally retains cluster-wide roles and restrictive defaults;
-  deleting them could affect another database. No `CASCADE` is used.
-- Revision `0002_identity_wallets` follows `0001_foundation`. Tests retain the
-  empty-schema M1 check at its original revision and cover fresh base → head,
-  approved M1 → M2, repeated head, M2 → M1 → M2 and head → base → head.
-  Downgrading M2 removes its identity and wallet data; use only on disposable databases.
-
-Run migrations with `uv run --frozen alembic upgrade head`. Migration execution is
-online only because role and database validation requires PostgreSQL. Application
-startup never applies migrations. Deployment must serialize migrations; concurrent
-migration runners are outside the supported workflow.
-
-## Identity and wallets (M2)
-
-| Endpoint | Behavior |
-| --- | --- |
-| `POST /auth/register` | Email and password → user, 201; duplicate normalized email → 409 |
-| `POST /auth/login` | Email and password → opaque Bearer token and expiry |
-| `POST /auth/logout` | Revoke the presented session, 204 |
-| `GET /users/me` | Current authenticated user |
-| `POST /wallets` | Currency EUR, USD or JPY → wallet and two zero accounts, 201 |
-| `GET /wallets` | Current user's wallets |
-| `GET /wallets/{wallet_id}` | Owned wallet; absent or foreign → identical 404 |
-
-Protected routes require `Authorization: Bearer <token>`. Passwords are 12–128
-characters at registration; email addresses are validated, ASCII-only and normalized
-to lowercase. Argon2id uses 64 MiB, three iterations, four lanes and a random salt.
-Tokens use 32 cryptographically random bytes; PostgreSQL stores only SHA-256
-digests. Login errors are identical for unknown users and wrong passwords; an
-unknown user still incurs Argon2 verification. Tokens/passwords never enter audit
-events, error payloads or application logs. Use HTTPS for any non-local deployment.
-
-Session lifetime defaults to 3600 seconds (`APP_SESSION_TTL_SECONDS`, 60–86400).
-Logout revokes only the presented session. Requests authenticated before a logout
-may finish; later session checks reject it. There are no cookies, JWT, refresh tokens,
-email verification, password recovery or account-deletion flows in this milestone.
-Registration's 409 intentionally reveals that a normalized email already exists.
-
-`payment.create_wallet` inserts the wallet, its `available` and `reserved` accounts
-and an audit event in one transaction. Uniqueness plus a deferred constraint trigger
-require exactly two accounts; a composite FK requires the wallet's currency.
-Balances are BIGINT, initially zero and nonnegative. Runtime has no direct balance
-write permission. M3 adds controlled dev/test opening journals; M4 adds internal
-transfers; M5 adds reservations and definitive settlement/release.
-
-Registration and login share an atomic PostgreSQL fixed-window counter per direct
-client IP:
-20 requests per 60 seconds by default, configured with `APP_AUTH_RATE_LIMIT` and
-`APP_AUTH_RATE_WINDOW_SECONDS`. Failed authentication consumes budget; exhaustion
-returns 429 and `Retry-After`. Logout remains available for a valid session even
-after this anonymous quota is exhausted. Uvicorn ignores forwarded headers in
-Compose and the documented host command. A future proxy deployment needs an explicit trusted-proxy
-policy. Clients sharing an IP share a budget; a fixed window permits boundary bursts
-and is not a distributed-attack defense. Counters, expired sessions and audits do not
-have automatic retention cleanup in M2.
-
-Password hashing/verification occurs outside write transactions. Successful state
-changes and their audits commit together; login failures have a separate audit
-transaction. The API database role remains a trusted boundary, as in the approved
-plan: it can act for users via granted operations; this is not per-user DB isolation.
-
-## Verification
+Run the complete maintained suite, including real PostgreSQL constraints, privileges,
+migrations, concurrency, provider HTTP failures and crash recovery:
 
 ```sh
 uv run --frozen ruff check .
 uv run --frozen ruff format --check .
 uv run --frozen mypy
-uv run --frozen pytest tests/unit
-docker compose up --build --wait --wait-timeout 180
-uv run --frozen pytest tests/integration
 uv run --frozen pytest
 uv run --frozen python scripts/smoke_api.py
-actionlint .github/workflows/ci.yml
-shellcheck docker/init-db.sh
-```
-
-Integration tests require the Compose stack and `.env`; missing infrastructure
-fails tests rather than silently skipping them. They create uniquely named
-`payment_test_*` databases, migrate as the real migrator and authenticate as the
-runtime login. Databases are removed in fixture cleanup. Use only a dedicated
-development/test cluster; do not run against a demonstration or production server.
-The administrator credential is confined to test database creation/cleanup and
-opening worker test sessions, which immediately reduce privileges with
-`SET SESSION AUTHORIZATION payment_worker` because that role is NOLOGIN.
-
-GitHub Actions installs the frozen lockfile, runs lint/format/types/unit tests,
-builds the real Compose stack, tests PostgreSQL migrations and privileges, then
-probes the running HTTP server. CI generates its own ephemeral credentials and
-removes its volumes. Pull requests run the same verification.
-
-The HTTP smoke script targets the local Compose API on port 8000. It checks the
-identity/wallet/ownership/logout flow and transfer rejection/replay/conflict; it leaves
-two dummy users, two zero-balance wallets and one retained idempotency record; its
-sessions are revoked. Run it only against the development stack.
-
-See [Milestone 1 verification](docs/milestone-1-verification.md) for commands,
-observed results, independent review and remaining limitations.
-See [Milestone 2 verification](docs/milestone-2-verification.md) for M2 evidence.
-
-## Ledger and fixed fixtures (M3)
-
-`0003_ledger` adds `ledger_journals` and `ledger_entries`, plus one `funding` and
-one `clearing` system account per currency. Only system accounts may be negative.
-Entries are nonzero BIGINT values bounded to ±1,000,000,000,000 minor units;
-projected balances use the full BIGINT range and overflow aborts the transaction.
-Composite foreign keys enforce the journal/account currency. Deferred constraint
-triggers require exactly two distinct accounts with opposite amounts at commit,
-including for an empty journal. UPDATE, DELETE and TRUNCATE triggers protect
-history; runtime roles have no direct writes to journals, entries or balances.
-
-The private `post_opening_pair` function validates ownership, currency, account
-kinds and bounds, then locks accounts individually in ascending UUID order. It
-inserts the pair and audit in the caller's transaction. An insertion trigger applies
-each delta with a conditional debit; PostgreSQL enforces nonnegative user balances.
-A unique wallet reference permits only one opening. A failed second line, audit,
-commit or overflow rolls everything back. M3 enables only the `opening` journal
-kind; later milestones must add their typed business operations and references.
-In M3, no financial function is executable by API/worker; M4/M5 grant only their
-validated business operations, never the private pair-posting helper. SECURITY DEFINER functions
-fix `search_path=pg_catalog,pg_temp` and fully qualify application objects.
-
-`GET /wallets/{wallet_id}/ledger?limit=50&offset=0` returns only the authenticated
-owner's lines, without counterpart or system account identifiers. Limits are 1–100,
-offset 0–1,000,000. Foreign and missing wallets both return 404. Existing wallet
-reads display projected balances. There is no HTTP funding endpoint.
-
-### Dev/test fixtures only
-
-Use a dedicated dev/test cluster. **Do not run this provisioning command in the
-demonstration deployment.** Normal Compose startup and Alembic never create
-`payment_dev` and never grant funding capabilities to the API or worker.
-Roles are cluster-wide; a database on a cluster previously used for fixtures may
-see the role but receives no opening grant through migrations.
-
-```sh
-# Supply your own local password via DEMO_PASSWORD without committing it.
-PAYMENT_LEDGER_DEV_FIXTURES=1 make seed-demo
-make test-ledger
-make reconcile
-```
-
-`DEMO_PASSWORD` must contain 12–128 characters. The explicit seed command uses
-migration credentials to provision a restricted NOLOGIN `payment_dev` role and
-fixed users `alice.demo@example.com` / `bob.demo@example.com`. It creates one
-EUR/USD/JPY wallet for each, then switches to the dev role to execute openings.
-Each EUR/USD wallet receives 100,000 minor units and each JPY wallet 10,000;
-the function accepts no arbitrary amount. Initial balances and audits are atomic.
-The batch prelocks all participating accounts in global UUID order. Reruns
-serialize using a transaction advisory lock and preserve existing balances,
-passwords and journals. A direct duplicate opening fails rather than funding twice.
-Migration credentials stay in this local CLI, never in the API process.
-
-`make reconcile` uses the restricted application role and a single SQL statement
-(snapshot) to compare all projected balances to the ledger, verify pairs and
-per-currency conservation, and detect negative user balances. It prints JSON and
-exits 0 for PASS, 1 for inconsistencies, 2 for a database error. It never repairs
-history or balances. M5 performs minimum provider recovery through the worker; the extended external
-reconciliation report and operator runbook remain M6.
-
-An empty M3 ledger supports M3 → M2 → M3. Downgrade refuses a populated ledger,
-preserving financial history. An administrator or compromised migrator can disable
-triggers/change schema; these guarantees intentionally exclude that trust boundary.
-
-See [Milestone 3 verification](docs/milestone-3-verification.md) for evidence.
-
-## Atomic internal transfers (M4)
-
-| Endpoint | Behavior |
-| --- | --- |
-| `POST /transfers` | Atomic transfer; requires `Idempotency-Key`, returns 201 |
-| `GET /transfers/{transfer_id}` | Transfer initiated by the authenticated user; otherwise 404 |
-| `GET /transfers?limit=50&offset=0` | Paginated transfers initiated by that user |
-
-Request body:
-
-```json
-{
-  "source_wallet_id": "<your-wallet-uuid>",
-  "destination_wallet_id": "<recipient-wallet-uuid>",
-  "currency": "EUR",
-  "amount_minor": 1500
-}
-```
-
-Amounts must be JSON integers from 1 through 1,000,000,000,000 minor units;
-booleans, floats and numeric strings are rejected. Wallets must be distinct and
-use the requested currency. Only the source owner can initiate the transfer;
-recipients see their credit through their own ledger history. Requests and reads
-of an unauthorized source/transfer return the same 404 as an absent resource.
-There is no currency conversion or direct reserved-account access.
-
-Keys contain 1–128 visible ASCII characters, scoped to `(user_id, operation_kind,
-key)`. PostgreSQL computes SHA-256 over canonical JSONB containing version 1, typed
-source/destination UUIDs, integer amount and currency. Equivalent UUID spelling or
-JSON field order does not change the hash. Concurrent duplicates wait on database
-uniqueness and then return the exact stored status/body. An identical replay returns
-201 and the original transfer ID/timestamp/journal ID; a changed payload returns 409.
-
-The claim, transfer, journal, two lines, projected balances, audit and stored response
-commit together. Expected business rejections (404, 409, 422) are also retained:
-a rejected insufficient-funds request remains rejected after a later credit; use a
-new key for a new attempt. Authentication/request-shape validation happens before
-claiming the key. Technical errors roll back the claim and every monetary effect.
-A 503 or lost response can be retried by the client using the **same** key.
-
-The service retries the complete local transaction at most three attempts, only
-for PostgreSQL deadlock/serialization-abort SQLSTATEs `40P01` and `40001`. It never
-blindly retries connection loss or ambiguous commits. Account locks follow the
-idempotency lock and are taken individually in ascending UUID order; balances are
-read again after lock acquisition. A private pair-posting function is shared by
-openings and transfers. Conditional debits, nonnegative CHECKs, pair triggers,
-unique references and deferred transfer/idempotency completeness checks protect
-financial state. Neither runtime nor dev roles can directly modify these tables
-or call the private posting helper. Completed transfers and idempotency responses
-are immutable and retained.
-
-`0004_transfers` preserves existing M3 openings. An empty M4 schema supports
-M4 → M3 → M4; downgrade refuses any retained transfer/idempotency history, including
-rejected requests. No cleanup deletes financial keys. Reconciliation remains read-only.
-
-```sh
-make test-transfers
-make test
-make reconcile
-```
-
-See [M4 verification](docs/milestone-4-verification.md) and
-[independent review](reviews/M4-review.md) for the recorded evidence.
-
-## Asynchronous outgoing payments (M5)
-
-| Endpoint | Behavior |
-| --- | --- |
-| `POST /payments` | Requires `Idempotency-Key`; reserves funds and always returns 202 for a new payment |
-| `GET /payments/{payment_id}` | Current state of an owned payment; absent/foreign → 404 |
-| `GET /payments?limit=50&offset=0` | Owner-scoped list, newest first |
-
-```json
-{
-  "wallet_id": "<your-wallet-uuid>",
-  "recipient": "merchant-1",
-  "currency": "EUR",
-  "amount_minor": 1500
-}
-```
-
-`recipient` is a fictional destination identifier (1–128 ASCII letters, digits,
-`_ . : @ -`), not bank-routing data. Money uses the same strict integer bounds
-as transfers. PostgreSQL hashes the canonical typed request, including recipient.
-Keys are retained and independently scoped to `payment`; a replay returns the
-original 202 body with `pending` even after completion. Use GET for current state.
-Expected business rejections are retained; a changed payload returns 409.
-
-`0005_payments` creates `payments` and `payment_outbox`. One transaction claims
-idempotency, records payment identity, posts available → reserved, creates the
-unique task, audits and stores the response. No HTTP call occurs in it. Deferred
-checks enforce the reservation/response relationship; a partial unique index
-allows at most one terminal journal, settlement **or** release. Identity and
-terminal state are immutable. Runtime roles cannot directly modify financial
-or outbox tables. M4 history survives upgrades. Downgrade refuses any payment
-idempotency history (including rejected requests), preserving financial evidence.
-
-The worker claims one due task using `FOR UPDATE SKIP LOCKED`, increments a
-lease generation and commits. It always queries provider state first, then may
-submit only after explicit absence, using `payment:<immutable UUID>` every time.
-Both HTTP calls occur without a checked-out database connection. Finalization
-locks outbox then payment, verifies a live lease/generation and locks ledger
-accounts in ascending UUID order. Confirmed success posts reserved → clearing;
-confirmed definitive refusal posts reserved → available. Posting, terminal state,
-outbox completion and audit commit together. Stale generations do nothing.
-
-Timeouts, transport/protocol failures, 5xx, malformed or mismatched evidence are
-unknown outcomes. No unknown outcome releases funds. At most five execution
-claims may submit, with exponential backoff and jitter (initial delays 1–3s,
-then 2–6s, 4–12s, 8–24s). Crashes consume a claim as well. Exhaustion moves to
-`needs_review`, leaves funds reserved, and schedules lookup-only reconciliation
-once per minute. A later definitive provider result may settle/release; absence
-never does, and exhausted payments are never automatically resubmitted. Local
-transaction retries are bounded to three aborted attempts (`40001`/`40P01`);
-ambiguous commits return to durable claim/reconciliation instead of blind replay.
-
-The provider uses SQLite `BEGIN IMMEDIATE`, unique key/payment identity and
-immutable terminal rows, with WAL and FULL synchronization. It commits before
-responding. Reopening the server preserves outcomes; contradictory key/parameters
-return 409. Compose uses a separate persistent volume with a non-root process.
-This fictional provider succeeds by default; tests inject refusal, unavailable,
-timeout-before-execution and timeout-after-acceptance modes without exposing
-fault controls through the payment API. The simulator is a trusted local fixture,
-not a real payment integration. Do not expose it as a public payment provider.
-
-Host worker (after Compose has provisioned the restricted login):
-
-```sh
-uv run --frozen python -m payment_ledger.payments.worker
-make test-payments
-# Dedicated dev/CI cluster only: leaves one funded fictional wallet and payment.
 PAYMENT_LEDGER_DEV_FIXTURES=1 uv run --frozen python -m scripts.smoke_payments
 ```
 
-`WORKER_DB_*` settings configure only the worker. Defaults match local Compose:
-port 15432, database `payment_ledger`, provider `http://127.0.0.1:8001`, 3-second
-HTTP socket timeout, 30-second leases, 1-second idle polling. HTTP bodies are
-bounded to 16 KiB. Socket timeouts are not absolute total deadlines for a peer
-that continuously trickles data; the fencing and provider idempotency protections
-still apply to a late worker. Production integration and broad operational
-observability are outside M5.
+Tests require the dedicated Compose database and `.env`. They create and remove their
+own `payment_test_*` databases. Missing infrastructure is a failure, never a silent skip.
+Smoke scripts use API port 8000 and leave fictional users/operations in the development
+stack. The payment smoke explicitly provisions dev funding. Do not run these commands
+against production or a shared demonstration cluster.
 
-See [M5 verification](docs/milestone-5-verification.md) and
-[independent review](reviews/M5-review.md) for verification evidence.
+GitHub Actions uses the frozen lockfile, ephemeral credentials, fresh Compose volumes,
+all unit/integration tests and both HTTP smoke flows. Optional local workflow checks:
+`actionlint .github/workflows/ci.yml` and `shellcheck docker/init-db.sh`.
+
+## Operations
+
+Follow the [operations runbook](docs/operations-runbook.md) to provision the separate
+operator login and use `metrics`, `reconcile`, `lookup` and `retry`. These tools have no
+public HTTP endpoint. Operator scheduling is audited in the same transaction and cannot
+steal an active lease, reset retries, force success or release an unresolved reservation.
+Reconciliation detects discrepancies without repairing financial history.
+
+API events use a validated/generated UUID `X-Request-ID`; financial audits retain it.
+Worker/provider events use the immutable payment UUID. Logs exclude headers, bodies,
+query strings and SQL exception text. Metrics cover pending payments, `needs_review`,
+oldest incomplete outbox age and expired leases.
+
+## Limitations
+
+This is a fictional-money portfolio backend, not a production-certified payment service.
+No real provider integration, refunds, currency exchange or callbacks are included.
+Database administrators/migrators and runtime principals remain explicit trust boundaries.
+
+Provider timeouts bound socket inactivity, not total response duration; a slow trickle
+can delay processing beyond a lease while fencing protects financial effects. Unknown
+outcomes after retry exhaustion remain reserved, with no force-release command.
+External reconciliation is paginated observation rather than an atomic distributed snapshot.
+The operator login is shared, with incident-ticket attribution. Fixed-window quotas allow
+boundary bursts; no automatic retention cleanup, backup/restore validation, disk/power-loss
+certification, production load qualification or dependency vulnerability audit is claimed.
+Additional independent review probes are not all retained in CI; the maintained count
+is 317, not the larger combined count from temporary review experiments.
+
+## Documentation and source layout
+
+- [Technical architecture](docs/architecture.md): transactions, financial invariants and roles.
+- [Operations runbook](docs/operations-runbook.md): diagnostics, incidents and safe recovery.
+- [Final verification](docs/final-verification.md): clean install, checks and repository state.
+- Milestone evidence: [M1](docs/milestone-1-verification.md), [M2](docs/milestone-2-verification.md),
+  [M3](docs/milestone-3-verification.md), [M4](docs/milestone-4-verification.md),
+  [M5](docs/milestone-5-verification.md), [M6](docs/milestone-6-verification.md).
+- [Independent M6 review](reviews/M6-review.md).
+
+`src/payment_ledger/` contains the API, identity services, `ledger/`, `transfers/`,
+`payments/` and `operations/`. Versioned schema/privileges live in `migrations/`;
+local provisioning and smoke commands in `scripts/`; real PostgreSQL tests in
+`tests/integration/`; isolated contracts in `tests/unit/`. `AGENTS.md` and repository
+skills define the contribution workflow. No merge occurs without explicit authorization.

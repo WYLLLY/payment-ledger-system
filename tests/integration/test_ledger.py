@@ -644,3 +644,47 @@ def test_seed_acquires_global_locks_before_posting(dev: Database) -> None:
     with dev.connect() as connection:
         assert connection.execute("SELECT count(*) FROM payment.ledger_journals").fetchone() == (6,)
     assert_clean(dev)
+
+
+def test_fixture_provisioning_restores_set_without_runtime_funding(database: Database) -> None:
+    with database.connect(user="payment_migrator") as connection:
+        provision_dev_role(connection)
+    # Reproduce a role with ADMIN but no SET, as found during clean-cluster smoke.
+    with database.connect(user="postgres") as connection:
+        grantors = connection.execute("""
+            SELECT pg_get_userbyid(m.grantor) FROM pg_auth_members m
+            JOIN pg_roles granted ON granted.oid=m.roleid
+            JOIN pg_roles member ON member.oid=m.member
+            WHERE granted.rolname='payment_dev' AND member.rolname='payment_migrator'
+        """).fetchall()
+        for (grantor,) in grantors:
+            connection.execute(
+                sql.SQL(
+                    "GRANT payment_dev TO payment_migrator WITH SET FALSE GRANTED BY {}"
+                ).format(sql.Identifier(str(grantor)))
+            )
+    with (
+        database.connect(user="payment_migrator") as connection,
+        pytest.raises(InsufficientPrivilege),
+    ):
+        connection.execute("SET LOCAL ROLE payment_dev")
+    owner, target = wallet(database)
+    with database.connect(user="payment_migrator") as connection:
+        provision_dev_role(connection)
+        connection.execute("SET LOCAL ROLE payment_dev")
+        connection.execute("SELECT payment.open_fixture_wallet(%s,%s)", (owner, target))
+    with database.connect() as connection:
+        assert connection.execute(
+            """
+            SELECT balance_minor FROM payment.ledger_accounts
+            WHERE wallet_id=%s AND account_kind='available'
+        """,
+            (target,),
+        ).fetchone() == (100000,)
+        assert connection.execute("""
+            SELECT has_function_privilege('payment_app',
+                'payment.open_fixture_wallet(uuid,uuid)','EXECUTE'),
+                has_function_privilege('payment_worker',
+                'payment.open_fixture_wallet(uuid,uuid)','EXECUTE')
+        """).fetchone() == (False, False)
+    assert_clean(database)

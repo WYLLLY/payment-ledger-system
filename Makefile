@@ -24,3 +24,11 @@ seed-demo:
 	$(UV) run --frozen python scripts/seed_demo.py
 reconcile:
 	$(UV) run --frozen python -m payment_ledger.ledger.reconciliation
+
+.PHONY: test-resilience ops-metrics ops-reconcile
+test-resilience:
+	$(UV) run --frozen pytest tests/integration/test_resilience.py tests/unit/test_observability.py
+ops-metrics:
+	$(UV) run --frozen python -m payment_ledger.operations.cli metrics
+ops-reconcile:
+	$(UV) run --frozen python -m payment_ledger.operations.cli reconcile

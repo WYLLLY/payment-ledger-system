@@ -16,6 +16,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import URL, Connection, Engine, create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
 
+from payment_ledger.observability import configure_logging, correlate_transactions, correlation_id
+from payment_ledger.observability import logger as event_logger
 from payment_ledger.payments.provider import ProviderClient, ProviderRequest
 from payment_ledger.payments.service import transaction
 
@@ -47,7 +49,7 @@ class WorkerSettings(BaseSettings):
 
 
 def create_worker_engine(settings: WorkerSettings) -> Engine:
-    return create_engine(
+    engine = create_engine(
         settings.database_url(),
         isolation_level="READ COMMITTED",
         hide_parameters=True,
@@ -55,6 +57,9 @@ def create_worker_engine(settings: WorkerSettings) -> Engine:
         pool_timeout=3,
         connect_args={"connect_timeout": 3, "options": "-c statement_timeout=3000"},
     )
+
+    correlate_transactions(engine)
+    return engine
 
 
 @dataclass(frozen=True)
@@ -109,12 +114,28 @@ async def run_once(engine: Engine, provider: ProviderClient, lease_seconds: int 
     item = await asyncio.to_thread(claim, engine, lease_seconds)
     if item is None:
         return False
-    outcome = await asyncio.to_thread(provider.lookup, item.payment)
-    if outcome == "not_found" and item.state == "pending":
-        outcome = await asyncio.to_thread(provider.submit, item.payment)
-    final = outcome if outcome in ("succeeded", "failed") else "unknown"
-    await asyncio.to_thread(finish, engine, item.payment.payment_id, item.generation, final)
-    return True
+    token = correlation_id.set(str(item.payment.payment_id))
+    fields = {"payment_id": str(item.payment.payment_id), "generation": item.generation}
+    try:
+        event_logger.info("payment_claimed", extra=fields)
+        outcome = await asyncio.to_thread(provider.lookup, item.payment)
+        if outcome == "not_found" and item.state == "pending":
+            outcome = await asyncio.to_thread(provider.submit, item.payment)
+        final = outcome if outcome in ("succeeded", "failed") else "unknown"
+        applied = await asyncio.to_thread(
+            finish, engine, item.payment.payment_id, item.generation, final
+        )
+        event_logger.info(
+            "payment_attempt_completed",
+            extra={
+                **fields,
+                "outcome": final,
+                "applied": applied,
+            },
+        )
+        return True
+    finally:
+        correlation_id.reset(token)
 
 
 async def serve(settings: WorkerSettings) -> None:
@@ -136,6 +157,7 @@ async def serve(settings: WorkerSettings) -> None:
 
 
 def main() -> None:
+    configure_logging()
     asyncio.run(serve(WorkerSettings()))
 
 

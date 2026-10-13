@@ -11,9 +11,11 @@ from payment_ledger.api import router as identity_router
 from payment_ledger.config import Settings
 from payment_ledger.database import create_database_engine
 from payment_ledger.health import router
+from payment_ledger.observability import RequestLogging, configure_logging
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
+    configure_logging()
     configuration = settings if settings is not None else Settings()
 
     @asynccontextmanager
@@ -25,6 +27,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             engine.dispose()
 
     app = FastAPI(title="Payment & Ledger System", version="0.1.0", lifespan=lifespan)
+    app.add_middleware(RequestLogging)
     app.state.settings = configuration
     install_error_handlers(app)
     app.include_router(router)
