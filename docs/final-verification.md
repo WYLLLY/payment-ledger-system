@@ -2,7 +2,8 @@
 
 Date: 13 October 2026 (Europe/Paris).
 
-This finalization adds no business feature and does not merge a pull request. It consolidates
+The system is complete through M6, approved and merged into `main`. Documentation
+finalization adds no business feature. It consolidates
 English documentation and verifies the complete system from an isolated installation.
 The clean-install smoke uncovered a dev/test provisioning defect; the small correction and
 its real PostgreSQL regression are described below. The approved architecture is unchanged.
@@ -16,14 +17,19 @@ its real PostgreSQL regression are described below. The approved architecture is
 | M3 ledger | PR #1 merged (`fbc62d1`); included in complete verification. |
 | M4 transfers | PR #2 merged (`eb42cce`); included in complete verification. |
 | M5 payments/recovery | PR #3 merged (`0df1832`); included in complete verification. |
-| M6 resilience/operations | User approved; implemented on `feature/m6-resilience`, PR #4 OPEN, targeting main. Not merged. |
+| M6 resilience/operations | Approved and merged via PR #4, merge commit `664e08e`; complete main CI passed. |
 
-Main remains `0df1832c6a2f4e42d7be31a3867b0b6b9393eb77`. M6 implementation is
-`abbf52a` and its first verification/runbook commit is `deb99fb`. The finalization commits
-follow those on the same branch; the clean-install correction is `2558dce`. No history is rewritten. See
-[PR #4](https://github.com/WYLLLY/payment-ledger-system/pull/4) for the current head and CI.
-“All milestones implemented and validated” does not mean M6 has already been integrated
-into main. Explicit merge authorization remains required.
+The verified merged revision is `664e08e1e355352dd5ebe901472a9694381556d1`.
+M6 implementation is `abbf52a`, its first verification/runbook commit is `deb99fb`,
+the clean-install correction is `2558dce`, and the documentation commit is `bb20688`.
+[PR #4](https://github.com/WYLLLY/payment-ledger-system/pull/4) was merged on
+13 October 2026 after explicit user approval. The merge tree matches the tested M6 head.
+
+[Main CI run 38442168726](https://github.com/WYLLLY/payment-ledger-system/actions/runs/38442168726)
+completed successfully on that merge: **31 unit + 286 integration tests, 0 failures,
+0 errors, 0 skipped**, plus fresh Compose startup/migrations, static checks and both
+real HTTP smoke flows. Documentation-only follow-ups do not change runtime code,
+migrations, dependencies or tests; their CI is recorded in the corresponding pull request.
 
 ## Isolated installation
 
@@ -113,10 +119,10 @@ included in the maintained-suite total.
 
 The complete suite covers all six milestones, including PostgreSQL constraints, forbidden
 privileges, migration paths, concurrency, crashes, reconciliation and recovery. No required
-check is intentionally skipped. The final CI on PR #4 must complete separately from these
-local results; the earlier M6 head's two runs were already SUCCESS:
-[push](https://github.com/WYLLLY/payment-ledger-system/actions/runs/38269073129) and
-[PR](https://github.com/WYLLLY/payment-ledger-system/actions/runs/38269152381).
+check is intentionally skipped. In addition to the successful merged-main run above,
+both final M6 branch workflows passed:
+[push](https://github.com/WYLLLY/payment-ledger-system/actions/runs/38440905634) and
+[PR](https://github.com/WYLLLY/payment-ledger-system/actions/runs/38440913410).
 
 ## Git secret checks
 
@@ -155,7 +161,12 @@ Remaining limits are intentional or independently reported, not hidden implement
 - Some additional adversarial experiments described in local independent review reports
   are not permanent CI regression tests. No new feature was added to address those gaps.
 
-Existing local changes in `reviews/M4-review.md`, `reviews/M5-review.md` and the untracked
-`reviews/M6-final-review.md` belong to prior review work. They were read where relevant,
-preserved without modification and excluded from finalization commits. The checkout therefore
-is not reported as globally clean; the delivered changes are committed separately.
+The previously local M4, M5 and final M6 review reports are retained in Git as historical
+review evidence. The [review index](../reviews/README.md) records the exact reviewed
+revisions and explains why historical counts differ from the current 317-test suite.
+Their original findings, test counts and descriptions of temporary artifacts are preserved;
+archiving a report does not claim its temporary probes were rerun or retained in CI.
+
+The [portfolio case study](portfolio-case-study.md) provides a concise project description,
+design rationale, evidence and demonstration sequence. Repository access is required while
+the source remains private; no public deployment or public source availability is claimed.
