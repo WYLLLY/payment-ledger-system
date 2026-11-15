@@ -7,6 +7,15 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class SmokeSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True)
+
+    api_port: int = Field(default=8000, ge=1, le=65535)
+
 
 def call(
     path: str,
@@ -23,7 +32,7 @@ def call(
     if idempotency_key is not None:
         headers["Idempotency-Key"] = idempotency_key
     request = Request(
-        f"http://127.0.0.1:8000{path}",
+        f"http://127.0.0.1:{SmokeSettings().api_port}{path}",
         method=method,
         headers=headers,
         data=json.dumps(payload).encode() if payload is not None else None,

@@ -8,10 +8,10 @@ query; they never infer failure from absence and never resubmit.
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Self
 from uuid import UUID
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import URL, Connection, Engine, create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
@@ -22,6 +22,7 @@ from payment_ledger.payments.provider import ProviderClient, ProviderRequest
 from payment_ledger.payments.service import transaction
 
 logger = logging.getLogger(__name__)
+FINALIZATION_MARGIN_SECONDS = 5
 
 
 class WorkerSettings(BaseSettings):
@@ -36,6 +37,12 @@ class WorkerSettings(BaseSettings):
     http_timeout: float = Field(default=3.0, gt=0, le=10)
     lease_seconds: int = Field(default=30, ge=1, le=300)
     poll_seconds: float = Field(default=1, gt=0, le=60)
+
+    @model_validator(mode="after")
+    def validate_lease(self) -> Self:
+        if self.lease_seconds <= self.http_timeout + FINALIZATION_MARGIN_SECONDS:
+            raise ValueError("Lease must exceed the HTTP timeout plus the finalization margin")
+        return self
 
     def database_url(self) -> URL:
         return URL.create(
@@ -111,6 +118,8 @@ def finish(
 
 
 async def run_once(engine: Engine, provider: ProviderClient, lease_seconds: int = 30) -> bool:
+    clock = asyncio.get_running_loop().time
+    lease_budget_end = clock() + lease_seconds - FINALIZATION_MARGIN_SECONDS
     item = await asyncio.to_thread(claim, engine, lease_seconds)
     if item is None:
         return False
@@ -118,10 +127,19 @@ async def run_once(engine: Engine, provider: ProviderClient, lease_seconds: int 
     fields = {"payment_id": str(item.payment.payment_id), "generation": item.generation}
     try:
         event_logger.info("payment_claimed", extra=fields)
-        outcome = await asyncio.to_thread(provider.lookup, item.payment)
-        if outcome == "not_found" and item.state == "pending":
-            outcome = await asyncio.to_thread(provider.submit, item.payment)
-        final = outcome if outcome in ("succeeded", "failed") else "unknown"
+        deadline = min(clock() + provider.timeout, lease_budget_end)
+        final: Literal["succeeded", "failed", "unknown"] = "unknown"
+        if clock() < deadline:
+            try:
+                async with asyncio.timeout_at(deadline):
+                    outcome = await provider.lookup_async(item.payment)
+                    if outcome == "not_found" and item.state == "pending":
+                        outcome = await provider.submit_async(item.payment)
+                    if outcome in ("succeeded", "failed"):
+                        final = outcome
+            except TimeoutError:
+                # The request might have reached the provider. Keep the reservation.
+                pass
         applied = await asyncio.to_thread(
             finish, engine, item.payment.payment_id, item.generation, final
         )

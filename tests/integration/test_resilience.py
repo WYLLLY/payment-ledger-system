@@ -606,3 +606,34 @@ def test_readiness_requires_m6_counter_privilege(database: Database) -> None:
                 "payment.take_financial_slot(uuid,text,text,integer,integer) FROM payment_app"
             )
         assert client.get("/health/ready").status_code == 503
+
+
+def test_metrics_cli_does_not_run_ledger_reconciliation(
+    scenario: Scenario,
+    operator_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from payment_ledger.operations import cli
+
+    post(scenario)
+    statements: list[str] = []
+    event.listen(
+        operator_engine,
+        "before_cursor_execute",
+        lambda conn, cursor, statement, parameters, context, executemany: statements.append(
+            statement
+        ),
+    )
+    monkeypatch.setenv("OPERATOR_DB_PASSWORD", "test-only")
+    monkeypatch.setattr(cli, "create_operator_engine", lambda settings: operator_engine)
+    monkeypatch.setattr("sys.argv", ["operations", "metrics"])
+
+    from payment_ledger.observability import correlation_id
+
+    before = correlation_id.get()
+    assert cli.main() == 0
+    assert correlation_id.get() == before
+    assert '"pending": 1' in capsys.readouterr().out
+    assert any("payment.payment_outbox" in statement for statement in statements)
+    assert all("payment.ledger_" not in statement for statement in statements)

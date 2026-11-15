@@ -9,12 +9,10 @@ This is not a payment processor or a Stripe clone.
 
 ## Project status
 
-All six approved milestones are implemented and verified on `feature/m6-resilience`.
-M1–M5 are merged into `main`. M6 is approved and remains in
-[PR #4](https://github.com/WYLLLY/payment-ledger-system/pull/4), pending explicit merge
-authorization. The maintained suite contains **317 tests: 31 unit and 286 integration**.
-See the [final verification record](docs/final-verification.md) for the tested revision,
-clean installation, CI, secret checks and remaining limitations.
+All six approved milestones are implemented and merged into `main`.
+[PR #4](https://github.com/WYLLLY/payment-ledger-system/pull/4) integrated M6.
+See the [verification record](docs/final-verification.md) for the original release
+evidence and the [remediation audit](reviews/final-audit.md) for the latest checks.
 
 ## What it does
 
@@ -58,10 +56,9 @@ is the architectural source of truth; its original approved text is preserved.
 
 Requirements: Python 3.14, uv 0.12.23, Docker Engine and Docker Compose v2 or later.
 Use a dedicated development/test PostgreSQL cluster. Repository access is required.
-Until M6 is merged, check out its branch explicitly:
 
 ```sh
-git clone --branch feature/m6-resilience https://github.com/WYLLLY/payment-ledger-system.git
+git clone https://github.com/WYLLLY/payment-ledger-system.git
 cd payment-ledger-system
 uv sync --frozen
 python3 scripts/init_env.py
@@ -184,15 +181,14 @@ This is a fictional-money portfolio backend, not a production-certified payment 
 No real provider integration, refunds, currency exchange or callbacks are included.
 Database administrators/migrators and runtime principals remain explicit trust boundaries.
 
-Provider timeouts bound socket inactivity, not total response duration; a slow trickle
-can delay processing beyond a lease while fencing protects financial effects. Unknown
-outcomes after retry exhaustion remain reserved, with no force-release command.
+The worker shares one monotonic deadline across provider lookup and submission.
+Its lease leaves time for fenced finalization. Unknown outcomes after retry
+exhaustion remain reserved, with no force-release command.
 External reconciliation is paginated observation rather than an atomic distributed snapshot.
 The operator login is shared, with incident-ticket attribution. Fixed-window quotas allow
 boundary bursts; no automatic retention cleanup, backup/restore validation, disk/power-loss
-certification, production load qualification or dependency vulnerability audit is claimed.
-Additional independent review probes are not all retained in CI; the maintained count
-is 317, not the larger combined count from temporary review experiments.
+certification or production load qualification is claimed. CI scans locked runtime
+Python dependencies and the application container.
 
 ## Documentation and source layout
 
