@@ -1,18 +1,18 @@
 """HTTP provider boundary: only matching, validated terminal evidence can release funds."""
 
+import asyncio
 import json
 from dataclasses import dataclass
-from http.client import HTTPException
 from typing import Literal
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+import httpx2
+from pydantic import BaseModel, ConfigDict, Field
 
 from payment_ledger.schemas import Currency
 
 Outcome = Literal["succeeded", "failed", "unknown", "not_found"]
+MAX_RESPONSE_BYTES = 16384
 
 
 class ProviderRequest(BaseModel):
@@ -38,52 +38,57 @@ class ProviderClient:
     timeout: float = 3.0
 
     def lookup(self, payment: ProviderRequest) -> Outcome:
-        return self._request(payment, submit=False)
+        return asyncio.run(self.lookup_async(payment))
 
     def submit(self, payment: ProviderRequest) -> Outcome:
-        return self._request(payment, submit=True)
+        return asyncio.run(self.submit_async(payment))
 
-    def _request(self, payment: ProviderRequest, *, submit: bool) -> Outcome:
+    async def lookup_async(self, payment: ProviderRequest) -> Outcome:
+        return await self._request(payment, submit=False)
+
+    async def submit_async(self, payment: ProviderRequest) -> Outcome:
+        return await self._request(payment, submit=True)
+
+    async def _request(self, payment: ProviderRequest, *, submit: bool) -> Outcome:
         url = self.base_url.rstrip("/") + "/payments"
-        data = None
-        if submit:
-            data = payment.model_dump_json().encode()
-        else:
+        if not submit:
             url += "/" + payment.provider_key
-        request = Request(
-            url,
-            data=data,
-            headers={
-                "Content-Type": "application/json",
-                "Idempotency-Key": payment.provider_key,
-                "X-Request-ID": str(payment.payment_id),
-            },
-        )
         try:
-            with urlopen(request, timeout=self.timeout) as response:
-                if response.status != 200:
-                    return "unknown"
-                body = response.read(16385)
-                if len(body) > 16384:
-                    return "unknown"
-            result = ProviderResult.model_validate_json(body)
-            if result.key != payment.provider_key or any(
-                getattr(result, name) != getattr(payment, name)
-                for name in ProviderRequest.model_fields
+            async with (
+                asyncio.timeout(self.timeout),
+                httpx2.AsyncClient(timeout=self.timeout, trust_env=False) as client,
+                client.stream(
+                    "POST" if submit else "GET",
+                    url,
+                    content=payment.model_dump_json().encode() if submit else None,
+                    headers={
+                        "Accept-Encoding": "identity",
+                        "Content-Type": "application/json",
+                        "Idempotency-Key": payment.provider_key,
+                        "X-Request-ID": str(payment.payment_id),
+                    },
+                ) as response,
             ):
-                return "unknown"
-            return result.state
-        except HTTPError as error:
-            try:
-                # Only the simulator's explicit absence response permits resubmission.
-                if not submit and error.code == 404:
-                    body = json.loads(error.read(16384))
-                    if body == {"detail": "Payment not found"}:
-                        return "not_found"
-            except ValueError, OSError, HTTPException:
-                pass
-            finally:
-                error.close()
+                if response.status_code != 200 and (submit or response.status_code != 404):
+                    return "unknown"
+                body = bytearray()
+                async for chunk in response.aiter_raw():
+                    if len(body) + len(chunk) > MAX_RESPONSE_BYTES:
+                        return "unknown"
+                    body.extend(chunk)
+                if response.status_code == 404:
+                    # Only the simulator's explicit absence response permits resubmission.
+                    return (
+                        "not_found"
+                        if json.loads(body) == {"detail": "Payment not found"}
+                        else "unknown"
+                    )
+                result = ProviderResult.model_validate_json(body)
+        except httpx2.HTTPError, httpx2.InvalidURL, TimeoutError, ValueError:
             return "unknown"
-        except URLError, OSError, HTTPException, ValidationError, ValueError:
+
+        if result.key != payment.provider_key or any(
+            getattr(result, name) != getattr(payment, name) for name in ProviderRequest.model_fields
+        ):
             return "unknown"
+        return result.state

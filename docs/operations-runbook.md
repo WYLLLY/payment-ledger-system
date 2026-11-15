@@ -139,7 +139,8 @@ Run `uv run --frozen pytest`, `ruff check .`, `ruff format --check .`, and `mypy
 locked environment and real dedicated PostgreSQL. CI includes all M1–M6 integration,
 concurrency, privilege, migration, HTTP-provider and process-crash tests.
 
-HTTP provider timeouts remain socket inactivity timeouts, not a hard total-response deadline.
-A slow trickle can hold a worker longer than its lease; fencing and provider idempotency protect
-financial correctness, but throughput may degrade. A report's findings need operator review;
-reconciliation is not a substitute for PostgreSQL constraints or an atomic distributed snapshot.
+The worker bounds lookup and submission with one monotonic deadline. The lease
+configuration includes a five-second margin for finalization. If the provider
+deadline expires, the worker records an unknown result and preserves the reservation.
+A report's findings need operator review. Reconciliation observes PostgreSQL and the
+provider at different times and complements the database constraints.

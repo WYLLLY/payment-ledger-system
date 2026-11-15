@@ -38,6 +38,18 @@ class LookupProvider(Protocol):
     def lookup(self, payment: ProviderRequest) -> Outcome: ...
 
 
+METRICS_SQL = """
+SELECT jsonb_build_object(
+        'pending',count(*) FILTER (WHERE state='pending'),
+        'needs_review',count(*) FILTER (WHERE state='needs_review'),
+        'oldest_outbox_age_seconds',coalesce(max(greatest(0,
+            floor(extract(epoch FROM statement_timestamp()-p.created_at))))
+            FILTER (WHERE NOT o.done),0),
+        'expired_leases',count(*) FILTER (WHERE NOT o.done AND o.lease_until<statement_timestamp())
+    ) FROM payment.payments p LEFT JOIN payment.payment_outbox o ON o.payment_id=p.id
+"""
+
+
 # One SQL statement gives internal checks and metrics a consistent READ COMMITTED snapshot.
 SNAPSHOT_SQL = (
     """
@@ -83,17 +95,20 @@ WITH ledger_issues AS (
 )
 SELECT jsonb_build_object(
     'issues', coalesce((SELECT jsonb_agg(to_jsonb(i) ORDER BY issue,reference) FROM issues i),'[]'),
-    'metrics', (SELECT jsonb_build_object(
-        'pending',count(*) FILTER (WHERE state='pending'),
-        'needs_review',count(*) FILTER (WHERE state='needs_review'),
-        'oldest_outbox_age_seconds',coalesce(max(greatest(0,
-            floor(extract(epoch FROM statement_timestamp()-p.created_at))))
-            FILTER (WHERE NOT o.done),0),
-        'expired_leases',count(*) FILTER (WHERE NOT o.done AND o.lease_until<statement_timestamp())
-    ) FROM payment.payments p LEFT JOIN payment.payment_outbox o ON o.payment_id=p.id)
+    'metrics', (
+"""
+    + METRICS_SQL
+    + """
+    )
 )
 """
 )
+
+
+def metrics(engine: Engine) -> Metrics:
+    with engine.connect() as connection:
+        result: Metrics = connection.execute(text(METRICS_SQL)).scalar_one()
+        return result
 
 
 def snapshot(engine: Engine) -> Snapshot:

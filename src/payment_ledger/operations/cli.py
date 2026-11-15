@@ -59,15 +59,27 @@ def main() -> int:
     args = parser.parse_args()
     configure_logging()
     identifier = uuid4()
-    correlation_id.set(str(identifier))
-    settings = OperatorSettings()
-    engine = create_operator_engine(settings)
+    token = correlation_id.set(str(identifier))
+    try:
+        settings = OperatorSettings()
+        engine = create_operator_engine(settings)
+        try:
+            return run(args, identifier, settings, engine)
+        finally:
+            engine.dispose()
+    finally:
+        correlation_id.reset(token)
+
+
+def run(
+    args: argparse.Namespace, identifier: UUID, settings: OperatorSettings, engine: Engine
+) -> int:
     provider = ProviderClient(settings.provider_url, settings.http_timeout)
     try:
         report: dict[str, object]
         status = 0
         if args.command == "metrics":
-            report = {"metrics": service.snapshot(engine)["metrics"]}
+            report = {"metrics": service.metrics(engine)}
         elif args.command == "reconcile":
             report = dict(service.snapshot(engine))
             external = service.reconcile_external(
@@ -100,8 +112,6 @@ def main() -> int:
             )
         )
         return 2
-    finally:
-        engine.dispose()
 
 
 if __name__ == "__main__":

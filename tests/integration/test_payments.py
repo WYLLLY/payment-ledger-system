@@ -2,7 +2,7 @@
 
 import asyncio
 import socket
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
@@ -14,10 +14,13 @@ from uuid import UUID, uuid4
 import psycopg
 import pytest
 import uvicorn
+from fastapi import FastAPI, Request, Response
 from fastapi.testclient import TestClient
 from psycopg.errors import CheckViolation, InsufficientPrivilege, UniqueViolation
 from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.exc import DBAPIError
+from starlette.middleware.base import RequestResponseEndpoint
+from starlette.responses import StreamingResponse
 
 from payment_ledger.database import create_database_engine
 from payment_ledger.main import create_app
@@ -130,7 +133,14 @@ def worker_engine(database: Database) -> Iterator[Engine]:
 
 @contextmanager
 def live_provider(path: Path, mode: Mode = "success") -> Iterator[ProviderClient]:
-    app = create_simulator(path, mode=mode, delay=0.2)
+    with serve_provider(
+        create_simulator(path, mode=mode, delay=0.2), timeout=0.08 if "timeout" in mode else 2
+    ) as provider:
+        yield provider
+
+
+@contextmanager
+def serve_provider(app: FastAPI, *, timeout: float) -> Iterator[ProviderClient]:
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
@@ -142,7 +152,7 @@ def live_provider(path: Path, mode: Mode = "success") -> Iterator[ProviderClient
         assert thread.is_alive() and monotonic() < deadline, "provider startup failed"
         Event().wait(0.005)
     try:
-        yield ProviderClient(f"http://127.0.0.1:{port}", timeout=0.08 if "timeout" in mode else 2)
+        yield ProviderClient(f"http://127.0.0.1:{port}", timeout=timeout)
     finally:
         server.should_exit = True
         thread.join(timeout=5)
@@ -721,13 +731,13 @@ def test_no_database_transaction_during_provider_io(
     event.listen(worker_engine, "checkin", checkin)
 
     class ObservedProvider(ProviderClient):
-        def lookup(self, payment: ProviderRequest) -> Outcome:
+        async def lookup_async(self, payment: ProviderRequest) -> Outcome:
             assert not active
-            return super().lookup(payment)
+            return await super().lookup_async(payment)
 
-        def submit(self, payment: ProviderRequest) -> Outcome:
+        async def submit_async(self, payment: ProviderRequest) -> Outcome:
             assert not active
-            return super().submit(payment)
+            return await super().submit_async(payment)
 
     post(scenario)
     with live_provider(tmp_path / "provider.db") as provider:
@@ -796,3 +806,64 @@ def test_worker_process_killed_after_provider_persists_then_recovers(
     assert payment_state(s, body["id"]) == "succeeded"
     assert counts(s) == (1, 1, 2)
     assert_clean(s.database)
+
+
+def test_claim_skips_index_range_of_deferred_payments(scenario: Scenario) -> None:
+    with scenario.database.connect(user="payment_migrator") as connection:
+        connection.execute(
+            """
+            SELECT payment.create_payment(%s, 'deferred-' || n, %s, 'merchant-1', 1, 'EUR')
+            FROM generate_series(1, 2000) AS n
+            """,
+            (scenario.alice, scenario.source),
+        )
+        connection.execute(
+            "UPDATE payment.payment_outbox SET next_attempt_at=now()+interval '1 hour'"
+        )
+        connection.execute("ANALYZE payment.payment_outbox")
+    with scenario.database.connect(user="postgres") as connection:
+        connection.execute("SET LOCAL enable_seqscan=off")
+        connection.execute("SET LOCAL ROLE payment_worker")
+        assert connection.execute("SELECT * FROM payment.claim_payment(30)").fetchall() == []
+        connection.execute("RESET ROLE")
+        row = connection.execute(
+            "SELECT idx_tup_fetch FROM pg_stat_xact_user_tables "
+            "WHERE schemaname='payment' AND relname='payment_outbox'"
+        ).fetchone()
+        assert row == (0,), "an empty due range must avoid fetching future outbox rows"
+
+
+def test_worker_provider_deadline_preserves_reservation_and_next_claim(
+    scenario: Scenario, worker_engine: Engine, tmp_path: Path
+) -> None:
+    body = post(scenario)
+    second = post(scenario, "next")
+    path = tmp_path / "deadline-provider.db"
+    app = create_simulator(path)
+    provider_cancelled = Event()
+
+    @app.middleware("http")
+    async def delay_first_lookup(request: Request, call_next: RequestResponseEndpoint) -> Response:
+        if request.method == "GET" and request.url.path.endswith(str(body["id"])):
+
+            async def chunks() -> AsyncIterator[bytes]:
+                try:
+                    for _ in range(40):
+                        yield b" "
+                        await asyncio.sleep(0.025)
+                    yield b'{"detail":"Payment not found"}'
+                finally:
+                    provider_cancelled.set()
+
+            return StreamingResponse(chunks(), status_code=404, media_type="application/json")
+        return await call_next(request)
+
+    with serve_provider(app, timeout=0.3) as provider:
+        assert asyncio.run(worker.run_once(worker_engine, provider))
+        assert provider_cancelled.wait(timeout=0.3), "worker left the previous response streaming"
+        assert payment_state(scenario, body["id"]) == "pending"
+        assert amounts(scenario) == (98000, 2000, 0)
+        assert asyncio.run(worker.run_once(worker_engine, provider))
+    assert payment_state(scenario, second["id"]) == "succeeded"
+    assert amounts(scenario) == (98000, 1000, 1000)
+    assert_clean(scenario.database)

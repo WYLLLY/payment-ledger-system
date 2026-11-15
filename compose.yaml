@@ -1,6 +1,6 @@
 services:
   db:
-    image: postgres:17
+    image: postgres:17.11@sha256:ff87138949ad9a46f32ff23bd6852b52ce024a13dffe9b4087be98292cdd3b4f
     environment:
       POSTGRES_USER: postgres
       POSTGRES_DB: payment_ledger
@@ -78,6 +78,8 @@ services:
       WORKER_DB_NAME: payment_ledger
       WORKER_DB_PASSWORD: ${WORKER_DB_PASSWORD:?Generate worker secret in .env}
       WORKER_PROVIDER_URL: http://provider:8001
+      WORKER_HTTP_TIMEOUT: ${WORKER_HTTP_TIMEOUT:-3}
+      WORKER_LEASE_SECONDS: ${WORKER_LEASE_SECONDS:-30}
     depends_on:
       migrate:
         condition: service_completed_successfully

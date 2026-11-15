@@ -1,27 +1,13 @@
 """Untrusted HTTP evidence must be complete and match the immutable payment identity."""
 
 import json
-from collections.abc import Iterator
-from contextlib import contextmanager
-from dataclasses import dataclass
-from email.message import Message
-from http.client import BadStatusLine, IncompleteRead
-from urllib.error import HTTPError
-from urllib.request import Request
+from collections.abc import AsyncIterator
 from uuid import uuid4
 
+import httpx2
 import pytest
 
 from payment_ledger.payments.provider import ProviderClient, ProviderRequest
-
-
-@dataclass
-class Response:
-    body: bytes
-    status: int = 200
-
-    def read(self, limit: int) -> bytes:
-        return self.body[:limit]
 
 
 @pytest.mark.parametrize(
@@ -70,23 +56,30 @@ def test_malformed_or_mismatched_provider_evidence_is_unknown(
     elif fault == "oversize":
         body = b" " * 17000 + body
 
-    @contextmanager
-    def respond(request: Request, *, timeout: float) -> Iterator[Response]:
-        assert timeout == 3
-        if fault == "truncated":
-            raise IncompleteRead(b"partial")
+    class BrokenBody(httpx2.AsyncByteStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            yield b"partial"
+            raise httpx2.RemoteProtocolError("response closed early")
+
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        assert request.extensions["timeout"]["read"] == 3
         if fault == "bad_status":
-            raise BadStatusLine("broken")
+            raise httpx2.RemoteProtocolError("malformed HTTP status")
         if fault == "truncated_404":
+            return httpx2.Response(404, stream=BrokenBody())
+        if fault == "truncated":
+            return httpx2.Response(200, stream=BrokenBody())
+        return httpx2.Response(200, stream=httpx2.ByteStream(body))
 
-            class TruncatedError(HTTPError):
-                def read(self, n: int = -1) -> bytes:
-                    raise IncompleteRead(b"partial")
+    real_client = httpx2.AsyncClient
 
-            raise TruncatedError(request.full_url, 404, "not found", Message(), None)
-        yield Response(body)
+    def make_client(*, timeout: float, trust_env: bool) -> httpx2.AsyncClient:
+        assert trust_env is False
+        return real_client(
+            timeout=timeout, trust_env=trust_env, transport=httpx2.MockTransport(respond)
+        )
 
-    monkeypatch.setattr("payment_ledger.payments.provider.urlopen", respond)
+    monkeypatch.setattr("payment_ledger.payments.provider.httpx2.AsyncClient", make_client)
     provider = ProviderClient("http://provider.invalid")
     assert provider.lookup(payment) == "unknown"
     assert provider.submit(payment) == "unknown"

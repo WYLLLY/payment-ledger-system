@@ -14,7 +14,7 @@ Its SQLite WAL database with FULL synchronization persists immutable outcomes in
 of PostgreSQL. No shared in-memory provider idempotency or distributed commit is assumed.
 
 API/worker startup does not run migrations. A separate migration process applies revisions
-0001–0006 and provisions credentials. Docker containers run application processes as a
+0001–0007 and provisions credentials. Docker containers run application processes as a
 non-root user. API, PostgreSQL and simulator bind to loopback on the host in Compose.
 
 ## Domain and database guarantees
