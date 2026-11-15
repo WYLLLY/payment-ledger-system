@@ -128,8 +128,9 @@ UUIDs. A database trigger fills missing payment audit correlation on crash-exhau
 No raw headers, payloads, query strings or exception details are included in application events.
 Native Uvicorn lifecycle/PostgreSQL logs retain their own formats.
 
-The [runbook](operations-runbook.md) explains socket-inactivity timeout limits, shared
-operator attribution and recovery after crashes. No real-provider guarantees, host-power-loss
-or backup-restore qualification, sustained production-load result or dependency vulnerability
-audit is claimed. Reconciliation detects discrepancies; it cannot protect against a privileged
-administrator deliberately changing schema and must never silently rewrite financial history.
+The [runbook](operations-runbook.md) explains the shared provider deadline, the lease
+margin reserved for finalization, operator attribution and crash recovery. CI scans the
+locked runtime dependencies and built application image. The local demonstration uses
+a fictitious provider and leaves production load, physical power loss and backup restoration
+unqualified. Reconciliation detects discrepancies and preserves financial history. Privileged
+schema changes remain outside the application trust boundary.
